@@ -31,8 +31,23 @@ end_date = st.sidebar.date_input("End Date", pd.to_datetime('2023-12-31'))
 # Function to fetch stock data
 @st.cache_data
 def fetch_data(ticker, start, end):
-    data = yf.download(ticker, start=start, end=end)['Adj Close']
-    return pd.DataFrame(data)
+    try:
+        # Fetch data for a single ticker
+        data = yf.download(ticker, start=start, end=end, auto_adjust=False)
+        if data.empty:
+            return pd.DataFrame()  # Return empty DataFrame if no data
+        # If single ticker, 'Adj Close' is a column; if multi-ticker, it's under ticker name
+        if isinstance(data, pd.Series):
+            data = pd.DataFrame(data, columns=['Adj Close'])
+        elif 'Adj Close' in data.columns:
+            data = data[['Adj Close']]  # Select only Adj Close
+        else:
+            st.error(f"No 'Adj Close' column found for {ticker}. Available columns: {data.columns.tolist()}")
+            return pd.DataFrame()
+        return data
+    except Exception as e:
+        st.error(f"Error fetching data for {ticker}: {str(e)}")
+        return pd.DataFrame()
 
 # Fetch data
 data = fetch_data(selected_ticker, start_date, end_date)
