@@ -139,17 +139,20 @@ else:
                     posts.append(post)
                     links.append(article.get('url', '#'))
                     
-                    # Extract sentiment score (e.g., from ticker_sentiment)
+                    # Extract and validate sentiment score
                     ticker_sent = article.get('ticker_sentiment', [])
                     score = 0.0
                     if ticker_sent:
                         for ts in ticker_sent:
                             if ts['ticker'] == ticker:
-                                score = ts.get('ticker_sentiment_score', 0.0)  # Average score
+                                score_value = ts.get('ticker_sentiment_score', None)
+                                if score_value is not None and isinstance(score_value, (int, float)):
+                                    score = float(score_value)  # Ensure numeric
                     sentiment_scores.append(score)
                 
-                # Average sentiment score
-                avg_score = np.mean(sentiment_scores) if sentiment_scores else 0.0
+                # Compute average only with valid numeric scores
+                valid_scores = [s for s in sentiment_scores if isinstance(s, (int, float)) and not np.isnan(s)]
+                avg_score = np.mean(valid_scores) if valid_scores else 0.0
                 
                 # Fallback if no articles
                 if not posts:
