@@ -10,9 +10,13 @@ import nltk
 from nltk.sentiment.vader import SentimentIntensityAnalyzer
 import joblib
 import os
+from datetime import datetime
 
 # Download NLTK data for VADER
 nltk.download('vader_lexicon', quiet=True)
+
+# Set current date for validation
+current_date = datetime.now().date()
 
 # Title of the app
 st.title("FinSight: Stock Analysis and Prediction Dashboard")
@@ -21,14 +25,51 @@ st.title("FinSight: Stock Analysis and Prediction Dashboard")
 st.sidebar.header("User Input")
 tickers = ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'TSLA']
 selected_ticker = st.sidebar.selectbox("Select Stock Ticker", tickers)
-start_date = st.sidebar.date_input("Start Date", pd.to_datetime('2018-01-01'))
-end_date = st.sidebar.date_input("End Date", pd.to_datetime('2023-12-31'))
+start_date = st.sidebar.date_input("Start Date", pd.to_datetime('2018-01-01').date())
+end_date = st.sidebar.date_input("End Date", current_date)
 
 # Validate date range
-if start_date >= end_date:
-    st.error("Error: Start date must be before end date.")
+if start_date > end_date:
+    st.error("Error: Start date must be before or equal to end date.")
 else:
+    # Adjust end_date if it exceeds current date
+    if end_date > current_date:
+        end_date = current_date
+        st.warning(f"End date set to today ({current_date}) as future dates are not available.")
+
     # Fetch data
+    @st.cache_data
+    def fetch_data(ticker, start, end):
+        try:
+            # Fetch data for a single ticker
+            data = yf.download(ticker, start=start, end=end, auto_adjust=False)
+            if data.empty:
+                st.error(f"No data returned for {ticker}. Check ticker or date range.")
+                return pd.DataFrame()
+            
+            # Handle different yfinance output formats
+            if isinstance(data, pd.Series):
+                # If Series (e.g., single column like Adj Close), convert to DataFrame
+                data = pd.DataFrame(data, columns=['Adj Close'])
+            elif isinstance(data.columns, pd.MultiIndex):
+                # Handle MultiIndex (e.g., [('Adj Close', 'AAPL')])
+                if ('Adj Close', ticker) in data.columns:
+                    data = data['Adj Close'][ticker].to_frame(name='Adj Close')
+                else:
+                    st.error(f"No 'Adj Close' column found for {ticker}. Available columns: {data.columns.tolist()}")
+                    return pd.DataFrame()
+            elif 'Adj Close' in data.columns:
+                # Handle flat DataFrame with 'Adj Close' column
+                data = data[['Adj Close']]
+            else:
+                st.error(f"No 'Adj Close' column found for {ticker}. Available columns: {data.columns.tolist()}")
+                return pd.DataFrame()
+            
+            return data
+        except Exception as e:
+            st.error(f"Error fetching data for {ticker}: {str(e)}")
+            return pd.DataFrame()
+
     data = fetch_data(selected_ticker, start_date, end_date)
 
     if not data.empty:
