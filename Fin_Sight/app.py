@@ -45,13 +45,15 @@ else:
         end_date = current_date
         st.warning(f"End date set to today ({current_date}) as future dates are not available.")
 
-    # Fetch data with validation and minimum data check
+    # Fetch data with enhanced validation and debug
     @st.cache_data
     def fetch_data(ticker, start, end):
         try:
             data = yf.download(ticker, start=start, end=end, auto_adjust=False)
-            if data.empty:
-                st.error(f"No data returned for {ticker}. Check ticker or date range.")
+            # Debug: Display raw data length
+            # st.write(f"Raw data length for {ticker}: {len(data)}")
+            if data.empty or len(data) == 0:
+                st.error(f"No data returned for {ticker}. Check ticker, date range, or network connection.")
                 return pd.DataFrame()
             # Flatten MultiIndex if present
             if isinstance(data.columns, pd.MultiIndex):
@@ -110,7 +112,7 @@ else:
         full_data = fetch_full_data(selected_ticker, start_date, end_date)
 
         # Fetch real-time sentiment from Alpha Vantage (hardcoded key)
-        @st.cache_data(ttl=300)  # Cache for 5 minutes
+        @st.cache_data
         def fetch_real_time_sentiment(ticker):
             try:
                 # Replace with your Alpha Vantage API key
@@ -229,6 +231,8 @@ else:
 
             if model_type == "Prophet":
                 df_prophet = data.reset_index().rename(columns={'index': 'ds', 'Adj Close': 'y'})  # Use 'index' as ds
+                # Debug: Display transformed data length
+                # st.write(f"df_prophet length: {len(df_prophet)}")
                 if df_prophet.empty or 'ds' not in df_prophet.columns or 'y' not in df_prophet.columns or len(df_prophet) < 100:
                     st.error("Insufficient data for Prophet. Try a date range with at least 100 days of data (e.g., 2018-01-01 to today).")
                 else:
