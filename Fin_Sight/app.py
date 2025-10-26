@@ -171,9 +171,48 @@ else:
             st.dataframe(pred_df)
 
         elif selected_tab == "Sentiment":
-            # Dynamic sentiment from Step 1 (paste the code here)
+            st.header("Sentiment Analysis")
+            try:
+                ticker_obj = yf.Ticker(selected_ticker)
+                news = ticker_obj.news[:10]  # Fetch top 10 recent news articles
+                if not news:
+                    raise ValueError("No news available.")
+                sample_news = [f"{article['title']} - {article.get('publisher', 'Unknown')}" for article in news]
+                links = [article['link'] for article in news]
+                sia = SentimentIntensityAnalyzer()
+                sentiments = [sia.polarity_scores(text)['compound'] for text in sample_news]
+                sentiments_df = pd.DataFrame({'News': sample_news, 'Link': links, 'Sentiment Score': sentiments})
+                
+                # Color-code scores
+                def color_sentiment(val):
+                    color = 'green' if val > 0.1 else 'red' if val < -0.1 else 'gray'
+                    return f'color: {color}'
+                st.dataframe(sentiments_df.style.applymap(color_sentiment, subset=['Sentiment Score']))
+                
+                pos = sentiments_df[sentiments_df['Sentiment Score'] > 0.1].shape[0]
+                neg = sentiments_df[sentiments_df['Sentiment Score'] < -0.1].shape[0]
+                neu = sentiments_df.shape[0] - pos - neg
+                st.write(f"Positive news count: {pos}")
+                st.write(f"Negative news count: {neg}")
+                st.write(f"Neutral news count: {neu}")
+            except Exception as e:
+                st.warning(f"Failed to fetch news: {str(e)}. Using sample data.")
+                sample_news = [
+                    "Apple releases new iPhone with great features.",
+                    "Microsoft faces antitrust lawsuit.",
+                    "Google AI advancements boost stock.",
+                    "Amazon reports record profits.",
+                    "Tesla recalls vehicles due to safety issues."
+                ]
+                sia = SentimentIntensityAnalyzer()
+                sentiments = [sia.polarity_scores(text)['compound'] for text in sample_news]
+                sentiments_df = pd.DataFrame({'News': sample_news, 'Sentiment Score': sentiments})
+                st.dataframe(sentiments_df)
 
         elif selected_tab == "Insights":
-            # Enhanced insights from Step 4 (paste the code here)
+            st.header("Insights")
+            avg_sentiment = sentiments_df['Sentiment Score'].mean() if 'sentiments_df' in locals() else 0
+            st.write(f"💡 Average news sentiment: {avg_sentiment:.2f}. Positive sentiment often correlates with price uptrends.")
+            st.write("Combining ML forecasts with sentiment can predict volatility—e.g., negative news may widen confidence bounds.")
     else:
         st.error("No data available for the selected parameters.")
