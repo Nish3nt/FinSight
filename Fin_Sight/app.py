@@ -6,11 +6,18 @@ from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
 from sklearn.model_selection import train_test_split
 import plotly.express as px
+import plotly.graph_objects as go
 import nltk
 from nltk.sentiment.vader import SentimentIntensityAnalyzer
 import joblib
 import os
 from datetime import datetime
+from prophet import Prophet
+from prophet.plot import plot_plotly
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import LSTM, Dense
+from sklearn.preprocessing import MinMaxScaler
+from streamlit_option_menu import option_menu
 
 # Download NLTK data for VADER
 nltk.download('vader_lexicon', quiet=True)
@@ -19,7 +26,7 @@ nltk.download('vader_lexicon', quiet=True)
 current_date = datetime.now().date()
 
 # Title of the app
-st.title("FinSight: Stock Analysis and Prediction Dashboard")
+st.title("FinSight: Advanced Stock Analysis Dashboard")
 
 # Sidebar for user input
 st.sidebar.header("User Input")
@@ -41,25 +48,18 @@ else:
     @st.cache_data
     def fetch_data(ticker, start, end):
         try:
-            # Fetch data for a single ticker
             data = yf.download(ticker, start=start, end=end, auto_adjust=False)
             if data.empty:
                 st.error(f"No data returned for {ticker}. Check ticker or date range.")
                 return pd.DataFrame()
             
-            # Handle different yfinance output formats
-            if isinstance(data, pd.Series):
-                # If Series (e.g., single column like Adj Close), convert to DataFrame
-                data = pd.DataFrame(data, columns=['Adj Close'])
-            elif isinstance(data.columns, pd.MultiIndex):
-                # Handle MultiIndex (e.g., [('Adj Close', 'AAPL')])
+            if isinstance(data.columns, pd.MultiIndex):
                 if ('Adj Close', ticker) in data.columns:
                     data = data['Adj Close'][ticker].to_frame(name='Adj Close')
                 else:
                     st.error(f"No 'Adj Close' column found for {ticker}. Available columns: {data.columns.tolist()}")
                     return pd.DataFrame()
             elif 'Adj Close' in data.columns:
-                # Handle flat DataFrame with 'Adj Close' column
                 data = data[['Adj Close']]
             else:
                 st.error(f"No 'Adj Close' column found for {ticker}. Available columns: {data.columns.tolist()}")
@@ -73,96 +73,107 @@ else:
     data = fetch_data(selected_ticker, start_date, end_date)
 
     if not data.empty:
-        st.header(f"Stock Data for {selected_ticker}")
-        st.dataframe(data.head())
+        # Fetch full OHLC data for viz
+        full_data = yf.download(selected_ticker, start=start_date, end=end_date)
 
-        # Data Visualization
-        st.header("Stock Price Visualization")
-        fig = px.line(data, x=data.index, y='Adj Close', title=f'{selected_ticker} Adjusted Close Price')
-        st.plotly_chart(fig)
+        # Multi-page layout with tabs
+        selected_tab = option_menu(
+            menu_title=None,
+            options=["Data & Viz", "Predictions", "Sentiment", "Insights"],
+            icons=["table", "graph-up", "chat-dots", "lightbulb"],
+            orientation="horizontal"
+        )
 
-        # Model Training (Assuming we train on the fly or load saved model)
-        model_file = f'{selected_ticker}_rf_model.pkl'
-        if os.path.exists(model_file):
-            rf_model = joblib.load(model_file)
-            st.success("Loaded pre-trained Random Forest model.")
-        else:
-            st.info("Training Random Forest model...")
-            # Simple feature engineering (e.g., lagged prices)
-            df = data.copy()
-            df['Lag1'] = df['Adj Close'].shift(1)
-            df.dropna(inplace=True)
-            if len(df) < 2:
-                st.error("Insufficient data to train model.")
-            else:
-                X = df[['Lag1']]
-                y = df['Adj Close']
-                X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-                
-                rf_model = RandomForestRegressor(n_estimators=100, random_state=42)
-                rf_model.fit(X_train, y_train)
-                
-                # Save model
-                joblib.dump(rf_model, model_file)
-                st.success("Trained and saved Random Forest model.")
+        if selected_tab == "Data & Viz":
+            st.header(f"Stock Data for {selected_ticker}")
+            st.dataframe(data)
+            csv = data.to_csv().encode('utf-8')
+            st.download_button("Download Data", csv, f"{selected_ticker}_data.csv", "text/csv")
+            
+            # Stock Price Visualization (line chart)
+            st.header("Stock Price Visualization")
+            fig = px.line(data, x=data.index, y='Adj Close', title=f'{selected_ticker} Adjusted Close Price')
+            st.plotly_chart(fig)
 
-                # Model Evaluation
-                st.header("Model Performance")
-                y_pred = rf_model.predict(X_test)
-                rf_r2 = r2_score(y_test, y_pred)
-                rf_rmse = np.sqrt(mean_squared_error(y_test, y_pred))
-                rf_mae = mean_absolute_error(y_test, y_pred)
-                st.write(f"Random Forest → R²: {rf_r2:.2f}, RMSE: {rf_rmse:.2f}, MAE: {rf_mae:.2f}")
+            # KPI Metrics Dashboard
+            st.header("Key Performance Indicators")
+            col1, col2, col3 = st.columns(3)
+            current_price = full_data['Close'].iloc[-1]
+            change_7d = (current_price - full_data['Close'].iloc[-8]) / full_data['Close'].iloc[-8] * 100 if len(full_data) > 7 else 0
+            volatility = full_data['Close'].pct_change().std() * np.sqrt(252) * 100
+            col1.metric("Current Price", f"${current_price:.2f}")
+            col2.metric("7-Day Change", f"{change_7d:.2f}%", delta_color="normal")
+            col3.metric("Annual Volatility", f"{volatility:.2f}%")
 
-        # Predictions
-        st.header("Stock Price Prediction")
-        if 'rf_model' in locals():
-            last_price = data['Adj Close'].iloc[-1]
+            # OHLC Candlestick Chart
+            st.header("OHLC Candlestick Chart")
+            fig_candle = go.Figure(data=[go.Candlestick(x=full_data.index,
+                                                       open=full_data['Open'],
+                                                       high=full_data['High'],
+                                                       low=full_data['Low'],
+                                                       close=full_data['Close'])])
+            fig_candle.update_layout(title=f'{selected_ticker} OHLC Prices')
+            st.plotly_chart(fig_candle)
+
+        elif selected_tab == "Predictions":
+            st.header("Stock Price Prediction")
+            model_type = st.selectbox("Model Type", ["Prophet", "LSTM"])
             future_days = st.slider("Predict for next N days", 1, 30, 5)
-            
-            # Simple prediction using last price as input
-            predictions = []
-            current_price = last_price
-            for _ in range(future_days):
-                pred = rf_model.predict([[current_price]])[0]
-                predictions.append(pred)
-                current_price = pred
-            
-            pred_df = pd.DataFrame({
-                'Date': pd.date_range(start=data.index[-1] + pd.Timedelta(days=1), periods=future_days),
-                'Predicted Price': predictions
-            })
-            st.dataframe(pred_df)
-            
-            # Plot predictions
-            fig_pred = px.line(pred_df, x='Date', y='Predicted Price', title='Future Price Predictions')
-            st.plotly_chart(fig_pred)
-        else:
-            st.warning("No model available for predictions.")
+            pred_df = pd.DataFrame()
 
-        # Sentiment Analysis (Dummy news for demo)
-        st.header("Sentiment Analysis")
-        sample_news = [
-            "Apple releases new iPhone with great features.",
-            "Microsoft faces antitrust lawsuit.",
-            "Google AI advancements boost stock.",
-            "Amazon reports record profits.",
-            "Tesla recalls vehicles due to safety issues."
-        ]
-        sia = SentimentIntensityAnalyzer()
-        sentiments = [sia.polarity_scores(text)['compound'] for text in sample_news]
-        sentiments_df = pd.DataFrame({'News': sample_news, 'compound': sentiments})
-        
-        pos = sentiments_df[sentiments_df['compound'] > 0].shape[0]
-        neg = sentiments_df[sentiments_df['compound'] < 0].shape[0]
-        neu = sentiments_df[sentiments_df['compound'] == 0].shape[0]
-        
-        st.write(f"Positive news count: {pos}")
-        st.write(f"Negative news count: {neg}")
-        st.write(f"Neutral news count: {neu}")
-        
-        # Insights
-        st.header("Insights")
-        st.write("💡 Combining stock prediction with sentiment shows how news affects price movement.")
+            if model_type == "Prophet":
+                df_prophet = data.reset_index().rename(columns={'Date': 'ds', 'Adj Close': 'y'})
+                with st.spinner("Training Prophet model..."):
+                    m = Prophet(daily_seasonality=True, yearly_seasonality=True)
+                    m.fit(df_prophet)
+                future = m.make_future_dataframe(periods=future_days)
+                forecast = m.predict(future)
+                pred_df = forecast[['ds', 'yhat', 'yhat_lower', 'yhat_upper']].tail(future_days)
+                pred_df.columns = ['Date', 'Predicted Price', 'Lower Bound', 'Upper Bound']
+                fig_pred = plot_plotly(m, forecast)
+                st.plotly_chart(fig_pred)
+
+            else:  # LSTM
+                if len(data) < 60:
+                    st.error("Need at least 60 days of data for LSTM.")
+                else:
+                    with st.spinner("Training LSTM model..."):
+                        scaler = MinMaxScaler()
+                        scaled_data = scaler.fit_transform(data['Adj Close'].values.reshape(-1, 1))
+                        time_step = 60
+                        X, y = [], []
+                        for i in range(time_step, len(scaled_data)):
+                            X.append(scaled_data[i-time_step:i, 0])
+                            y.append(scaled_data[i, 0])
+                        X, y = np.array(X), np.array(y)
+                        X = X.reshape(X.shape[0], X.shape[1], 1)
+                        
+                        model = Sequential()
+                        model.add(LSTM(50, return_sequences=True, input_shape=(time_step, 1)))
+                        model.add(LSTM(50))
+                        model.add(Dense(1))
+                        model.compile(optimizer='adam', loss='mean_squared_error')
+                        model.fit(X, y, epochs=10, batch_size=32, verbose=0)
+                        
+                        # Predict
+                        predictions = []
+                        last_seq = scaled_data[-time_step:].reshape(1, time_step, 1)
+                        for _ in range(future_days):
+                            pred = model.predict(last_seq, verbose=0)[0][0]
+                            predictions.append(pred)
+                            last_seq = np.append(last_seq[:, 1:, :], [[[pred]]], axis=1)
+                        pred_df['Predicted Price'] = scaler.inverse_transform(np.array(predictions).reshape(-1, 1)).flatten()
+                        pred_df['Date'] = pd.date_range(start=data.index[-1] + pd.Timedelta(days=1), periods=future_days)
+                        
+                        fig_pred = px.line(pred_df, x='Date', y='Predicted Price', title='LSTM Future Price Predictions')
+                        st.plotly_chart(fig_pred)
+            
+            st.dataframe(pred_df)
+
+        elif selected_tab == "Sentiment":
+            # Dynamic sentiment from Step 1 (paste the code here)
+
+        elif selected_tab == "Insights":
+            # Enhanced insights from Step 4 (paste the code here)
     else:
         st.error("No data available for the selected parameters.")
