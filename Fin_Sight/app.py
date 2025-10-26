@@ -110,24 +110,22 @@ else:
 
         full_data = fetch_full_data(selected_ticker, start_date, end_date)
 
-        # Fetch real-time sentiment from Alpha Vantage (hardcoded key)
+        # Fetch real-time sentiment from Alpha Vantage (hardcoded key) - No longer used, but kept for reference
         @st.cache_data(ttl=300)  # Cache for 5 minutes
         def fetch_real_time_sentiment(ticker):
             try:
-                # Replace with your Alpha Vantage API key
                 api_key = "D8VCWYUPOFJR8D52"  # Insert your key here (e.g., "ABC123XYZ")
                 if not api_key or api_key == "your_alphavantage_key_here":
-                    st.warning("Please replace 'your_alphavantage_key_here' with your Alpha Vantage API key in the code (get it from https://www.alphavantage.co/support/#api-key).")
+                    st.warning("Please replace 'your_alphavantage_key_here' with a valid Alpha Vantage API key. Get one at https://www.alphavantage.co/support/#api-key and restart the app after updating.")
                     raise ValueError("No valid API key provided.")
                 url = f"https://www.alphavantage.co/query?function=NEWS_SENTIMENT&tickers={ticker}&apikey={api_key}"
                 response = requests.get(url)
                 if response.status_code != 200:
-                    raise ValueError(f"Alpha Vantage API error: {response.status_code}")
+                    raise ValueError(f"Alpha Vantage API error: Status code {response.status_code}")
                 data = response.json()
                 if 'feed' not in data:
-                    raise ValueError("No sentiment data returned.")
+                    raise ValueError("No sentiment data returned in API response.")
                 
-                # Extract sentiment scores and articles
                 posts = []
                 links = []
                 sentiment_scores = []
@@ -139,7 +137,6 @@ else:
                     posts.append(post)
                     links.append(article.get('url', '#'))
                     
-                    # Extract and validate sentiment score
                     ticker_sent = article.get('ticker_sentiment', [])
                     score = 0.0
                     if ticker_sent:
@@ -147,14 +144,12 @@ else:
                             if ts['ticker'] == ticker:
                                 score_value = ts.get('ticker_sentiment_score', None)
                                 if score_value is not None and isinstance(score_value, (int, float)):
-                                    score = float(score_value)  # Ensure numeric
+                                    score = float(score_value)
                     sentiment_scores.append(score)
                 
-                # Compute average only with valid numeric scores
                 valid_scores = [s for s in sentiment_scores if isinstance(s, (int, float)) and not np.isnan(s)]
                 avg_score = np.mean(valid_scores) if valid_scores else 0.0
                 
-                # Fallback if no articles
                 if not posts:
                     posts = [f"Average sentiment score for {ticker}: {avg_score}"]
                     links = ['#']
@@ -162,12 +157,11 @@ else:
                 return posts, links, avg_score
             except Exception as e:
                 st.warning(f"Alpha Vantage failed: {str(e)}. Using yfinance fallback.")
-                # Fallback to yfinance news
                 ticker_obj = yf.Ticker(ticker)
                 news = ticker_obj.news[:10]
                 posts = [f"{article.get('title', 'No title')} - {article.get('publisher', 'Unknown')}" for article in news if article.get('title')]
                 links = [article.get('link', '#') for article in news]
-                avg_score = 0.0  # Default for fallback
+                avg_score = 0.0
                 return posts if posts else ["Sample: Neutral market news."], ['#'], avg_score
 
         sample_posts, links, avg_sentiment_from_api = fetch_real_time_sentiment(selected_ticker)
@@ -315,18 +309,50 @@ else:
             st.caption(f"Real-time data from Alpha Vantage news for '{selected_ticker}'. Refresh for updates.")
 
         elif selected_tab == "Insights":
-            st.header("Insights")
-            avg_sentiment = avg_sentiment_from_api  # Use Alpha Vantage's direct score
-            if avg_sentiment > 0.1:
-                sentiment_note = "🟢 Bullish sentiment detected—consider long positions if predictions align."
-            elif avg_sentiment < -0.1:
-                sentiment_note = "🔴 Bearish sentiment—watch for downside risk in forecasts."
+            st.header("Stock Correlation Heatmap")
+            st.write("Explore how the selected stock correlates with major tech stocks over the chosen period. Darker colors indicate stronger positive correlations, while lighter colors show weaker or negative correlations.")
+
+            # Fetch correlation data for selected ticker and other tickers
+            tickers = ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'TSLA']
+            correlation_data = {}
+            for ticker in tickers:
+                try:
+                    temp_data = yf.download(ticker, start=start_date, end=end_date, auto_adjust=False)['Adj Close']
+                    correlation_data[ticker] = temp_data
+                except Exception as e:
+                    st.warning(f"Could not fetch data for {ticker}: {str(e)}. Using available data.")
+                    continue
+
+            # Create a DataFrame with all adjusted close prices
+            if correlation_data:
+                df_corr = pd.DataFrame(correlation_data)
+                # Calculate correlation matrix
+                corr_matrix = df_corr.corr()
+
+                # Create an interactive heatmap
+                fig_heatmap = go.Figure(data=go.Heatmap(
+                    z=corr_matrix.values,
+                    x=corr_matrix.index.values,
+                    y=corr_matrix.columns.values,
+                    colorscale='RdBu',
+                    zmin=-1, zmax=1,
+                    colorbar_title="Correlation",
+                    hovertemplate="Stock: %{y}<br>Correlated with: %{x}<br>Value: %{z:.2f}<extra></extra>"
+                ))
+                fig_heatmap.update_layout(
+                    title=f"Correlation Heatmap for {selected_ticker} and Peers ({start_date} to {end_date})",
+                    xaxis_title="Stocks",
+                    yaxis_title="Stocks",
+                    height=500
+                )
+                st.plotly_chart(fig_heatmap)
+
+                # Highlight key insight
+                selected_corr = corr_matrix[selected_ticker].drop(selected_ticker)
+                max_corr_ticker = selected_corr.idxmax()
+                max_corr_value = selected_corr.max()
+                st.write(f"💡 **Key Insight**: {selected_ticker} shows the strongest correlation with {max_corr_ticker} at {max_corr_value:.2f}. This could indicate similar market movements or sector influence!")
             else:
-                sentiment_note = "⚪ Neutral sentiment—rely on technical indicators."
-            if avg_sentiment == 0.0 and not sample_posts[0].startswith("Average sentiment score"):
-                st.warning("Fallback data used; real-time sentiment unavailable. Check API key or replace with a valid one from https://www.alphavantage.co/support/#api-key.")
-            st.write(f"💡 Average sentiment score: {avg_sentiment:.2f}")
-            st.write(sentiment_note)
-            st.write("Real-time news sentiment can amplify ML predictions—e.g., high positive scores narrow confidence intervals.")
+                st.warning("No correlation data available. Please ensure a valid date range with data for multiple stocks.")
     else:
         st.error("No data available for the selected parameters.")
