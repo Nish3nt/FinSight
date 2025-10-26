@@ -33,7 +33,7 @@ st.title("FinSight: Advanced Stock Analysis Dashboard")
 st.sidebar.header("User Input")
 tickers = ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'TSLA']
 selected_ticker = st.sidebar.selectbox("Select Stock Ticker", tickers)
-start_date = st.sidebar.date_input("Start Date", pd.to_datetime('2018-01-01').date())
+start_date = st.sidebar.date_input("Start Date", pd.to_datetime('2018-01-01').date())  # Default to a range with data
 end_date = st.sidebar.date_input("End Date", current_date)
 
 # Validate date range
@@ -45,7 +45,7 @@ else:
         end_date = current_date
         st.warning(f"End date set to today ({current_date}) as future dates are not available.")
 
-    # Fetch data with validation
+    # Fetch data with validation and minimum data check
     @st.cache_data
     def fetch_data(ticker, start, end):
         try:
@@ -69,8 +69,8 @@ else:
                 data = data[['Open', 'High', 'Low', 'Close', 'Adj Close']]
             else:
                 data = data[['Adj Close']] if 'Adj Close' in data.columns else pd.DataFrame()
-            if data.empty or 'Adj Close' not in data.columns:
-                st.error(f"Invalid data for {ticker}. Ensure date range has data.")
+            if data.empty or len(data) < 100:  # Require at least 100 days of data
+                st.warning(f"Insufficient data ({len(data)} days) for {ticker}. Try a longer date range (e.g., 2018-01-01 to today).")
                 return pd.DataFrame()
             return data
         except Exception as e:
@@ -229,8 +229,8 @@ else:
 
             if model_type == "Prophet":
                 df_prophet = data.reset_index().rename(columns={'index': 'ds', 'Adj Close': 'y'})  # Use 'index' as ds
-                if df_prophet.empty or 'ds' not in df_prophet.columns or 'y' not in df_prophet.columns:
-                    st.error("Insufficient data for Prophet. Try a different date range with more data.")
+                if df_prophet.empty or 'ds' not in df_prophet.columns or 'y' not in df_prophet.columns or len(df_prophet) < 100:
+                    st.error("Insufficient data for Prophet. Try a date range with at least 100 days of data (e.g., 2018-01-01 to today).")
                 else:
                     with st.spinner("Training Prophet model..."):
                         try:
@@ -244,8 +244,7 @@ else:
                             pred_df['Lower Bound'] = pred_df['Lower Bound'].astype(float)
                             pred_df['Upper Bound'] = pred_df['Upper Bound'].astype(float)
                             fig_pred = plot_plotly(m, forecast)
-                            # Simplify fill customization to avoid Plotly errors
-                            fig_pred.update_traces(line_color='#26A69A', fill='tozeroy', name='Prophet Prediction')  # Use valid fill option
+                            fig_pred.update_traces(line_color='#26A69A', fill='tozeroy', name='Prophet Prediction')  # Valid fill option
                             st.plotly_chart(fig_pred)
                         except Exception as e:
                             st.error(f"Prophet training failed: {str(e)}. Try a different date range.")
@@ -282,7 +281,6 @@ else:
                             pred_df['Predicted Price'] = scaler.inverse_transform(np.array(predictions).reshape(-1, 1)).flatten()
                             pred_df['Date'] = pd.date_range(start=data.index[-1] + pd.Timedelta(days=1), periods=future_days)
                             
-                            # Customize color: Purple for LSTM prediction
                             fig_pred = px.line(pred_df, x='Date', y='Predicted Price', title='LSTM Future Price Predictions', color_discrete_sequence=['#AB47BC'])
                             st.plotly_chart(fig_pred)
                         except Exception as e:
