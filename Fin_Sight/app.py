@@ -70,7 +70,7 @@ else:
                 data = data[['Open', 'High', 'Low', 'Close', 'Adj Close']]
             else:
                 data = data[['Adj Close']] if 'Adj Close' in data.columns else pd.DataFrame()
-            if data.empty or len(data) < 30:  # Lowered threshold to 30 days for Prophet
+            if data.empty or len(data) < 30:  # Minimum 30 days for Prophet
                 st.warning(f"Insufficient data ({len(data) if not data.empty else 0} days) for {ticker}. Try a longer date range (e.g., 2018-01-01 to today).")
                 return pd.DataFrame()
             return data
@@ -117,7 +117,7 @@ else:
                 # Replace with your Alpha Vantage API key
                 api_key = "D8VCWYUPOFJR8D52"  # Insert your key here (e.g., "ABC123XYZ")
                 if not api_key or api_key == "your_alphavantage_key_here":
-                    st.warning("Please replace 'your_alphavantage_key_here' with your Alpha Vantage API key in the code.")
+                    st.warning("Please replace 'your_alphavantage_key_here' with your Alpha Vantage API key in the code (get it from https://www.alphavantage.co/support/#api-key).")
                     raise ValueError("No valid API key provided.")
                 url = f"https://www.alphavantage.co/query?function=NEWS_SENTIMENT&tickers={ticker}&apikey={api_key}"
                 response = requests.get(url)
@@ -263,4 +263,70 @@ else:
                                 X.append(scaled_data[i-time_step:i, 0])
                                 y.append(scaled_data[i, 0])
                             X, y = np.array(X), np.array(y)
-                            X = X
+                            X = X.reshape((X.shape[0], X.shape[1], 1))
+                            
+                            model = Sequential()
+                            model.add(LSTM(50, return_sequences=True, input_shape=(time_step, 1)))
+                            model.add(LSTM(50))
+                            model.add(Dense(1))
+                            model.compile(optimizer='adam', loss='mean_squared_error')
+                            model.fit(X, y, epochs=5, batch_size=32, verbose=0)
+                            
+                            # Predict
+                            predictions = []
+                            last_seq = scaled_data[-time_step:].reshape(1, time_step, 1)
+                            for _ in range(future_days):
+                                pred = model.predict(last_seq, verbose=0)[0][0]
+                                predictions.append(pred)
+                                last_seq = np.append(last_seq[:, 1:, :], [[[pred]]], axis=1)
+                            pred_df['Predicted Price'] = scaler.inverse_transform(np.array(predictions).reshape(-1, 1)).flatten()
+                            pred_df['Date'] = pd.date_range(start=data.index[-1] + pd.Timedelta(days=1), periods=future_days)
+                            
+                            fig_pred = px.line(pred_df, x='Date', y='Predicted Price', title='LSTM Future Price Predictions', color_discrete_sequence=['#AB47BC'])
+                            st.plotly_chart(fig_pred)
+                        except Exception as e:
+                            st.error(f"LSTM training failed: {str(e)}. Using fallback prediction.")
+                            last_price = float(data['Adj Close'].iloc[-1])
+                            pred_df['Predicted Price'] = [last_price] * future_days
+                            pred_df['Date'] = pd.date_range(start=data.index[-1] + pd.Timedelta(days=1), periods=future_days)
+                            fig_pred = px.line(pred_df, x='Date', y='Predicted Price', title='LSTM Future Price Predictions', color_discrete_sequence=['#AB47BC'])
+                            st.plotly_chart(fig_pred)
+            
+            if not pred_df.empty:
+                st.dataframe(pred_df.style.format({'Predicted Price': '{:.2f}', 'Lower Bound': '{:.2f}', 'Upper Bound': '{:.2f}'}))
+
+        elif selected_tab == "Sentiment":
+            st.header("Real-Time Sentiment Analysis (Alpha Vantage News)")
+            sia = SentimentIntensityAnalyzer()
+            sentiments = [sia.polarity_scores(text)['compound'] for text in sample_posts]
+            sentiments_df = pd.DataFrame({'Post/News': sample_posts, 'Link': links, 'Sentiment Score': sentiments})
+            
+            def color_sentiment(val):
+                color = 'green' if val > 0.1 else 'red' if val < -0.1 else 'gray'
+                return f'color: {color}'
+            st.dataframe(sentiments_df.style.applymap(color_sentiment, subset=['Sentiment Score']).format({'Sentiment Score': '{:.2f}'}))
+
+            pos = len([s for s in sentiments if s > 0.1])
+            neg = len([s for s in sentiments if s < -0.1])
+            neu = len(sentiments) - pos - neg
+            st.metric("Positive Count", pos)
+            st.metric("Negative Count", neg)
+            st.metric("Neutral Count", neu)
+            st.caption(f"Real-time data from Alpha Vantage news for '{selected_ticker}'. Refresh for updates.")
+
+        elif selected_tab == "Insights":
+            st.header("Insights")
+            avg_sentiment = avg_sentiment_from_api  # Use Alpha Vantage's direct score
+            if avg_sentiment > 0.1:
+                sentiment_note = "🟢 Bullish sentiment detected—consider long positions if predictions align."
+            elif avg_sentiment < -0.1:
+                sentiment_note = "🔴 Bearish sentiment—watch for downside risk in forecasts."
+            else:
+                sentiment_note = "⚪ Neutral sentiment—rely on technical indicators."
+            if avg_sentiment == 0.0 and not sample_posts[0].startswith("Average sentiment score"):
+                st.warning("Fallback data used; real-time sentiment unavailable. Check API key or replace with a valid one from https://www.alphavantage.co/support/#api-key.")
+            st.write(f"💡 Average sentiment score: {avg_sentiment:.2f}")
+            st.write(sentiment_note)
+            st.write("Real-time news sentiment can amplify ML predictions—e.g., high positive scores narrow confidence intervals.")
+    else:
+        st.error("No data available for the selected parameters.")
