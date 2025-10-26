@@ -38,7 +38,7 @@ end_date = st.sidebar.date_input("End Date", current_date)
 # Validate date range
 if start_date > end_date:
     st.error("Error: Start date must be before or equal to end date.")
-    st.stop()  # Halt execution if invalid
+    st.stop()
 else:
     if end_date > current_date:
         end_date = current_date
@@ -54,15 +54,21 @@ else:
                 return pd.DataFrame()
             # Flatten MultiIndex if present
             if isinstance(data.columns, pd.MultiIndex):
-                if ('Adj Close', ticker) in data.columns:
-                    data = data['Adj Close'][ticker].to_frame(name='Adj Close')
+                if all((col, ticker) in data.columns for col in ['Open', 'High', 'Low', 'Close', 'Adj Close']):
+                    data = pd.DataFrame({
+                        'Open': data[('Open', ticker)],
+                        'High': data[('High', ticker)],
+                        'Low': data[('Low', ticker)],
+                        'Close': data[('Close', ticker)],
+                        'Adj Close': data[('Adj Close', ticker)]
+                    })
                 else:
                     data = data.xs('Adj Close', axis=1, level=1, drop_level=True).rename(columns={ticker: 'Adj Close'})
-            elif 'Adj Close' in data.columns:
-                data = data[['Adj Close']]
+            elif all(col in data.columns for col in ['Open', 'High', 'Low', 'Close', 'Adj Close']):
+                data = data[['Open', 'High', 'Low', 'Close', 'Adj Close']]
             else:
-                st.error(f"No 'Adj Close' column found for {ticker}. Available columns: {data.columns.tolist()}")
-                return pd.DataFrame()
+                st.warning(f"Incomplete data for {ticker}. Using available columns.")
+                data = data[['Adj Close']] if 'Adj Close' in data.columns else pd.DataFrame()
             return data
         except Exception as e:
             st.error(f"Error fetching data for {ticker}: {str(e)}")
@@ -71,16 +77,36 @@ else:
     data = fetch_data(selected_ticker, start_date, end_date)
 
     if not data.empty:
-        # Fetch full OHLC data for viz
-        try:
-            full_data = yf.download(selected_ticker, start=start_date, end=end_date)
-            if full_data.empty:
-                raise ValueError("OHLC data empty.")
-            if isinstance(full_data.columns, pd.MultiIndex):
-                full_data = full_data.xs('Close', axis=1, level=1, drop_level=True) if 'Close' in full_data.columns else full_data
-        except Exception as e:
-            st.warning(f"Error fetching OHLC data: {str(e)}. Using Adj Close data only.")
-            full_data = data.copy()  # Fallback to Adj Close data
+        # Fetch full OHLC data for viz with retry
+        def fetch_full_data(ticker, start, end, max_retries=3):
+            for attempt in range(max_retries):
+                try:
+                    full_data = yf.download(ticker, start=start, end=end, auto_adjust=False)
+                    if full_data.empty:
+                        raise ValueError("Full data empty.")
+                    if isinstance(full_data.columns, pd.MultiIndex):
+                        if all((col, ticker) in full_data.columns for col in ['Open', 'High', 'Low', 'Close', 'Adj Close']):
+                            full_data = pd.DataFrame({
+                                'Open': full_data[('Open', ticker)],
+                                'High': full_data[('High', ticker)],
+                                'Low': full_data[('Low', ticker)],
+                                'Close': full_data[('Close', ticker)],
+                                'Adj Close': full_data[('Adj Close', ticker)]
+                            })
+                        else:
+                            full_data = full_data.xs('Close', axis=1, level=1, drop_level=True) if 'Close' in full_data.columns else full_data
+                    elif all(col in full_data.columns for col in ['Open', 'High', 'Low', 'Close', 'Adj Close']):
+                        full_data = full_data[['Open', 'High', 'Low', 'Close', 'Adj Close']]
+                    else:
+                        raise ValueError("Missing OHLC columns.")
+                    return full_data
+                except Exception as e:
+                    if attempt == max_retries - 1:
+                        st.warning(f"Failed to fetch OHLC data after {max_retries} attempts: {str(e)}. Using Adj Close data.")
+                        return data.copy()
+                    st.warning(f"Retry {attempt + 1}/{max_retries} for OHLC data: {str(e)}")
+
+        full_data = fetch_full_data(selected_ticker, start_date, end_date)
 
         # Multi-page layout with tabs
         selected_tab = option_menu(
@@ -105,7 +131,6 @@ else:
             st.header("Key Performance Indicators")
             col1, col2, col3 = st.columns(3)
             try:
-                # Ensure scalar values
                 current_price = float(full_data['Close'].iloc[-1]) if 'Close' in full_data.columns and not full_data.empty else float(data['Adj Close'].iloc[-1])
                 change_7d = ((current_price - float(full_data['Close'].iloc[-8])) / float(full_data['Close'].iloc[-8]) * 100 
                             if len(full_data) > 7 and 'Close' in full_data.columns else 0.0)
@@ -131,7 +156,7 @@ else:
                 fig_candle.update_layout(title=f'{selected_ticker} OHLC Prices')
                 st.plotly_chart(fig_candle)
             else:
-                st.warning("OHLC data unavailable. Candlestick chart not displayed.")
+                st.warning("OHLC data unavailable. Candlestick chart not displayed due to data limitations.")
 
         elif selected_tab == "Predictions":
             st.header("Stock Price Prediction")
@@ -177,7 +202,7 @@ else:
                             model.add(LSTM(50))
                             model.add(Dense(1))
                             model.compile(optimizer='adam', loss='mean_squared_error')
-                            model.fit(X, y, epochs=5, batch_size=32, verbose=0)  # Reduced epochs for speed
+                            model.fit(X, y, epochs=5, batch_size=32, verbose=0)
                             
                             # Predict
                             predictions = []
