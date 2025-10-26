@@ -108,6 +108,40 @@ else:
 
         full_data = fetch_full_data(selected_ticker, start_date, end_date)
 
+        # Fetch news with retry
+        def fetch_news(ticker, max_retries=3):
+            for attempt in range(max_retries):
+                try:
+                    ticker_obj = yf.Ticker(ticker)
+                    news = ticker_obj.news
+                    if not news or not isinstance(news, list):
+                        raise ValueError("No news data returned.")
+                    # Filter and validate news items
+                    valid_news = []
+                    for article in news[:10]:
+                        title = article.get('title', article.get('description', 'No title available'))
+                        publisher = article.get('publisher', 'Unknown')
+                        valid_news.append(f"{title} - {publisher}")
+                    if not valid_news:
+                        raise ValueError("No valid news items found.")
+                    return valid_news, [article.get('link', '#') for article in news[:10]]
+                except Exception as e:
+                    if attempt == max_retries - 1:
+                        st.warning(f"Failed to fetch news after {max_retries} attempts: {str(e)}. Using sample data.")
+                        return (
+                            [
+                                "Apple releases new iPhone with great features.",
+                                "Microsoft faces antitrust lawsuit.",
+                                "Google AI advancements boost stock.",
+                                "Amazon reports record profits.",
+                                "Tesla recalls vehicles due to safety issues."
+                            ],
+                            ['#'] * 5
+                        )
+                    st.warning(f"Retry {attempt + 1}/{max_retries} for news: {str(e)}")
+
+        sample_news, links = fetch_news(selected_ticker)
+
         # Multi-page layout with tabs
         selected_tab = option_menu(
             menu_title=None,
@@ -227,14 +261,8 @@ else:
 
         elif selected_tab == "Sentiment":
             st.header("Sentiment Analysis")
+            sia = SentimentIntensityAnalyzer()
             try:
-                ticker_obj = yf.Ticker(selected_ticker)
-                news = ticker_obj.news[:10]
-                if not news:
-                    raise ValueError("No news available.")
-                sample_news = [f"{article['title']} - {article.get('publisher', 'Unknown')}" for article in news]
-                links = [article['link'] for article in news]
-                sia = SentimentIntensityAnalyzer()
                 sentiments = [sia.polarity_scores(text)['compound'] for text in sample_news]
                 sentiments_df = pd.DataFrame({'News': sample_news, 'Link': links, 'Sentiment Score': sentiments})
                 
@@ -250,22 +278,13 @@ else:
                 st.write(f"Negative news count: {neg}")
                 st.write(f"Neutral news count: {neu}")
             except Exception as e:
-                st.warning(f"Failed to fetch news: {str(e)}. Using sample data.")
-                sample_news = [
-                    "Apple releases new iPhone with great features.",
-                    "Microsoft faces antitrust lawsuit.",
-                    "Google AI advancements boost stock.",
-                    "Amazon reports record profits.",
-                    "Tesla recalls vehicles due to safety issues."
-                ]
-                sia = SentimentIntensityAnalyzer()
-                sentiments = [sia.polarity_scores(text)['compound'] for text in sample_news]
-                sentiments_df = pd.DataFrame({'News': sample_news, 'Sentiment Score': sentiments})
-                st.dataframe(sentiments_df.style.format({'Sentiment Score': '{:.2f}'}))
+                st.error(f"Error processing sentiment: {str(e)}. Please try again later.")
 
         elif selected_tab == "Insights":
             st.header("Insights")
             avg_sentiment = float(sentiments_df['Sentiment Score'].mean()) if 'sentiments_df' in locals() and not sentiments_df.empty else 0.0
+            if avg_sentiment == 0.0:
+                st.warning("No real-time sentiment data available. Using fallback value.")
             st.write(f"💡 Average news sentiment: {avg_sentiment:.2f}. Positive sentiment often correlates with price uptrends.")
             st.write("Combining ML forecasts with sentiment can predict volatility—e.g., negative news may widen confidence bounds.")
     else:
