@@ -114,7 +114,7 @@ else:
         def fetch_real_time_sentiment(ticker):
             try:
                 # Replace with your Alpha Vantage API key
-                api_key = "your_alphavantage_key_here"  # Insert your key here (e.g., "ABC123XYZ")
+                api_key = "D8VCWYUPOFJR8D52"  # Insert your key here (e.g., "ABC123XYZ")
                 if not api_key or api_key == "your_alphavantage_key_here":
                     st.warning("Please replace 'your_alphavantage_key_here' with your Alpha Vantage API key in the code.")
                     raise ValueError("No valid API key provided.")
