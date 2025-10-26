@@ -102,14 +102,20 @@ else:
             # KPI Metrics Dashboard
             st.header("Key Performance Indicators")
             col1, col2, col3 = st.columns(3)
-            current_price = full_data['Close'].iloc[-1] if 'Close' in full_data.columns else data['Adj Close'].iloc[-1]
-            change_7d = ((current_price - full_data['Close'].iloc[-8]) / full_data['Close'].iloc[-8] * 100 
-                         if len(full_data) > 7 and 'Close' in full_data.columns else 0)
-            volatility = (full_data['Close'].pct_change().std() * np.sqrt(252) * 100 
-                          if 'Close' in full_data.columns and len(full_data) > 1 else 0)
-            col1.metric("Current Price", f"${current_price:.2f}")
-            col2.metric("7-Day Change", f"{change_7d:.2f}%", delta_color="normal")
-            col3.metric("Annual Volatility", f"{volatility:.2f}%")
+            try:
+                current_price = full_data['Close'].iloc[-1].item() if 'Close' in full_data.columns and not full_data.empty else data['Adj Close'].iloc[-1].item()
+                change_7d = ((current_price - full_data['Close'].iloc[-8].item()) / full_data['Close'].iloc[-8].item() * 100 
+                            if len(full_data) > 7 and 'Close' in full_data.columns else 0)
+                volatility = (full_data['Close'].pct_change().std() * np.sqrt(252) * 100 
+                            if 'Close' in full_data.columns and len(full_data) > 1 else 0)
+                col1.metric("Current Price", f"${current_price:.2f}")
+                col2.metric("7-Day Change", f"{change_7d:.2f}%")
+                col3.metric("Annual Volatility", f"{volatility:.2f}%")
+            except (TypeError, IndexError) as e:
+                st.warning(f"Error calculating metrics: {str(e)}. Using default values.")
+                col1.metric("Current Price", "$0.00")
+                col2.metric("7-Day Change", "0.00%")
+                col3.metric("Annual Volatility", "0.00%")
 
             # OHLC Candlestick Chart
             st.header("OHLC Candlestick Chart")
@@ -158,7 +164,7 @@ else:
                                 X.append(scaled_data[i-time_step:i, 0])
                                 y.append(scaled_data[i, 0])
                             X, y = np.array(X), np.array(y)
-                            X = X.reshape(X.shape[0], X.shape[1], 1)
+                            X = X.reshape((X.shape[0], X.shape[1], 1))
                             
                             model = Sequential()
                             model.add(LSTM(50, return_sequences=True, input_shape=(time_step, 1)))
@@ -181,7 +187,7 @@ else:
                             st.plotly_chart(fig_pred)
                         except Exception as e:
                             st.error(f"LSTM training failed: {str(e)}. Using fallback prediction.")
-                            pred_df['Predicted Price'] = [data['Adj Close'].iloc[-1]] * future_days
+                            pred_df['Predicted Price'] = [data['Adj Close'].iloc[-1].item()] * future_days
                             pred_df['Date'] = pd.date_range(start=data.index[-1] + pd.Timedelta(days=1), periods=future_days)
             
             if not pred_df.empty:
