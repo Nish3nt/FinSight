@@ -110,14 +110,15 @@ else:
 
         full_data = fetch_full_data(selected_ticker, start_date, end_date)
 
-        # Fetch real-time sentiment from Alpha Vantage (free alternative)
+        # Fetch real-time sentiment from Alpha Vantage (hardcoded key)
         @st.cache_data(ttl=300)  # Cache for 5 minutes
         def fetch_real_time_sentiment(ticker):
             try:
-                api_key = st.secrets.get("ALPHA_VANTAGE_API_KEY", None)
-                if not api_key:
-                    st.warning("No ALPHA_VANTAGE_API_KEY found in secrets. Using yfinance fallback. Add it to .streamlit/secrets.toml like: ALPHA_VANTAGE_API_KEY = \"your_key_here\"")
-                    raise ValueError("No API key found.")
+                # Replace with your Alpha Vantage API key
+                api_key = "D8VCWYUPOFJR8D52"  # Insert your key here (e.g., "ABC123XYZ")
+                if not api_key or api_key == "your_alphavantage_key_here":
+                    st.warning("Please replace 'your_alphavantage_key_here' with your Alpha Vantage API key in the code.")
+                    raise ValueError("No valid API key provided.")
                 url = f"https://www.alphavantage.co/query?function=NEWS_SENTIMENT&tickers={ticker}&apikey={api_key}"
                 response = requests.get(url)
                 if response.status_code != 200:
