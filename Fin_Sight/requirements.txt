@@ -3,8 +3,9 @@ yfinance
 pandas
 numpy
 scikit-learn
-matplotlib
-seaborn
 plotly
 nltk
 joblib
+prophet
+tensorflow
+streamlit-option-menu
