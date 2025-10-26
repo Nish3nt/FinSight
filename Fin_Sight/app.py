@@ -38,8 +38,8 @@ end_date = st.sidebar.date_input("End Date", current_date)
 # Validate date range
 if start_date > end_date:
     st.error("Error: Start date must be before or equal to end date.")
+    st.stop()  # Halt execution if invalid
 else:
-    # Adjust end_date if it exceeds current date
     if end_date > current_date:
         end_date = current_date
         st.warning(f"End date set to today ({current_date}) as future dates are not available.")
@@ -52,19 +52,17 @@ else:
             if data.empty:
                 st.error(f"No data returned for {ticker}. Check ticker or date range.")
                 return pd.DataFrame()
-            
+            # Flatten MultiIndex if present
             if isinstance(data.columns, pd.MultiIndex):
                 if ('Adj Close', ticker) in data.columns:
                     data = data['Adj Close'][ticker].to_frame(name='Adj Close')
                 else:
-                    st.error(f"No 'Adj Close' column found for {ticker}. Available columns: {data.columns.tolist()}")
-                    return pd.DataFrame()
+                    data = data.xs('Adj Close', axis=1, level=1, drop_level=True).rename(columns={ticker: 'Adj Close'})
             elif 'Adj Close' in data.columns:
                 data = data[['Adj Close']]
             else:
                 st.error(f"No 'Adj Close' column found for {ticker}. Available columns: {data.columns.tolist()}")
                 return pd.DataFrame()
-            
             return data
         except Exception as e:
             st.error(f"Error fetching data for {ticker}: {str(e)}")
@@ -76,9 +74,13 @@ else:
         # Fetch full OHLC data for viz
         try:
             full_data = yf.download(selected_ticker, start=start_date, end=end_date)
+            if full_data.empty:
+                raise ValueError("OHLC data empty.")
+            if isinstance(full_data.columns, pd.MultiIndex):
+                full_data = full_data.xs('Close', axis=1, level=1, drop_level=True) if 'Close' in full_data.columns else full_data
         except Exception as e:
-            st.error(f"Error fetching OHLC data: {str(e)}. Using Adj Close data only.")
-            full_data = data  # Fallback to Adj Close data
+            st.warning(f"Error fetching OHLC data: {str(e)}. Using Adj Close data only.")
+            full_data = data.copy()  # Fallback to Adj Close data
 
         # Multi-page layout with tabs
         selected_tab = option_menu(
@@ -94,7 +96,7 @@ else:
             csv = data.to_csv().encode('utf-8')
             st.download_button("Download Data", csv, f"{selected_ticker}_data.csv", "text/csv")
             
-            # Stock Price Visualization (line chart)
+            # Stock Price Visualization
             st.header("Stock Price Visualization")
             fig = px.line(data, x=data.index, y='Adj Close', title=f'{selected_ticker} Adjusted Close Price')
             st.plotly_chart(fig)
@@ -103,15 +105,16 @@ else:
             st.header("Key Performance Indicators")
             col1, col2, col3 = st.columns(3)
             try:
-                current_price = full_data['Close'].iloc[-1].item() if 'Close' in full_data.columns and not full_data.empty else data['Adj Close'].iloc[-1].item()
-                change_7d = ((current_price - full_data['Close'].iloc[-8].item()) / full_data['Close'].iloc[-8].item() * 100 
-                            if len(full_data) > 7 and 'Close' in full_data.columns else 0)
+                # Ensure scalar values
+                current_price = float(full_data['Close'].iloc[-1]) if 'Close' in full_data.columns and not full_data.empty else float(data['Adj Close'].iloc[-1])
+                change_7d = ((current_price - float(full_data['Close'].iloc[-8])) / float(full_data['Close'].iloc[-8]) * 100 
+                            if len(full_data) > 7 and 'Close' in full_data.columns else 0.0)
                 volatility = (full_data['Close'].pct_change().std() * np.sqrt(252) * 100 
-                            if 'Close' in full_data.columns and len(full_data) > 1 else 0)
+                            if 'Close' in full_data.columns and len(full_data) > 1 else 0.0)
                 col1.metric("Current Price", f"${current_price:.2f}")
                 col2.metric("7-Day Change", f"{change_7d:.2f}%")
                 col3.metric("Annual Volatility", f"{volatility:.2f}%")
-            except (TypeError, IndexError) as e:
+            except (ValueError, IndexError, TypeError) as e:
                 st.warning(f"Error calculating metrics: {str(e)}. Using default values.")
                 col1.metric("Current Price", "$0.00")
                 col2.metric("7-Day Change", "0.00%")
@@ -119,7 +122,7 @@ else:
 
             # OHLC Candlestick Chart
             st.header("OHLC Candlestick Chart")
-            if 'Open' in full_data.columns and 'High' in full_data.columns and 'Low' in full_data.columns and 'Close' in full_data.columns:
+            if all(col in full_data.columns for col in ['Open', 'High', 'Low', 'Close']):
                 fig_candle = go.Figure(data=[go.Candlestick(x=full_data.index,
                                                            open=full_data['Open'],
                                                            high=full_data['High'],
@@ -146,6 +149,9 @@ else:
                         forecast = m.predict(future)
                         pred_df = forecast[['ds', 'yhat', 'yhat_lower', 'yhat_upper']].tail(future_days)
                         pred_df.columns = ['Date', 'Predicted Price', 'Lower Bound', 'Upper Bound']
+                        pred_df['Predicted Price'] = pred_df['Predicted Price'].astype(float)
+                        pred_df['Lower Bound'] = pred_df['Lower Bound'].astype(float)
+                        pred_df['Upper Bound'] = pred_df['Upper Bound'].astype(float)
                         fig_pred = plot_plotly(m, forecast)
                         st.plotly_chart(fig_pred)
                     except Exception as e:
@@ -171,7 +177,7 @@ else:
                             model.add(LSTM(50))
                             model.add(Dense(1))
                             model.compile(optimizer='adam', loss='mean_squared_error')
-                            model.fit(X, y, epochs=10, batch_size=32, verbose=0)
+                            model.fit(X, y, epochs=5, batch_size=32, verbose=0)  # Reduced epochs for speed
                             
                             # Predict
                             predictions = []
@@ -187,19 +193,18 @@ else:
                             st.plotly_chart(fig_pred)
                         except Exception as e:
                             st.error(f"LSTM training failed: {str(e)}. Using fallback prediction.")
-                            pred_df['Predicted Price'] = [data['Adj Close'].iloc[-1].item()] * future_days
+                            last_price = float(data['Adj Close'].iloc[-1])
+                            pred_df['Predicted Price'] = [last_price] * future_days
                             pred_df['Date'] = pd.date_range(start=data.index[-1] + pd.Timedelta(days=1), periods=future_days)
             
             if not pred_df.empty:
-                st.dataframe(pred_df)
-            else:
-                st.warning("No predictions available.")
+                st.dataframe(pred_df.style.format({'Predicted Price': '{:.2f}', 'Lower Bound': '{:.2f}', 'Upper Bound': '{:.2f}'}))
 
         elif selected_tab == "Sentiment":
             st.header("Sentiment Analysis")
             try:
                 ticker_obj = yf.Ticker(selected_ticker)
-                news = ticker_obj.news[:10]  # Fetch top 10 recent news articles
+                news = ticker_obj.news[:10]
                 if not news:
                     raise ValueError("No news available.")
                 sample_news = [f"{article['title']} - {article.get('publisher', 'Unknown')}" for article in news]
@@ -208,15 +213,14 @@ else:
                 sentiments = [sia.polarity_scores(text)['compound'] for text in sample_news]
                 sentiments_df = pd.DataFrame({'News': sample_news, 'Link': links, 'Sentiment Score': sentiments})
                 
-                # Color-code scores
                 def color_sentiment(val):
                     color = 'green' if val > 0.1 else 'red' if val < -0.1 else 'gray'
                     return f'color: {color}'
-                st.dataframe(sentiments_df.style.applymap(color_sentiment, subset=['Sentiment Score']))
-                
-                pos = sentiments_df[sentiments_df['Sentiment Score'] > 0.1].shape[0]
-                neg = sentiments_df[sentiments_df['Sentiment Score'] < -0.1].shape[0]
-                neu = sentiments_df.shape[0] - pos - neg
+                st.dataframe(sentiments_df.style.applymap(color_sentiment, subset=['Sentiment Score']).format({'Sentiment Score': '{:.2f}'}))
+
+                pos = len([s for s in sentiments if s > 0.1])
+                neg = len([s for s in sentiments if s < -0.1])
+                neu = len(sentiments) - pos - neg
                 st.write(f"Positive news count: {pos}")
                 st.write(f"Negative news count: {neg}")
                 st.write(f"Neutral news count: {neu}")
@@ -232,11 +236,11 @@ else:
                 sia = SentimentIntensityAnalyzer()
                 sentiments = [sia.polarity_scores(text)['compound'] for text in sample_news]
                 sentiments_df = pd.DataFrame({'News': sample_news, 'Sentiment Score': sentiments})
-                st.dataframe(sentiments_df)
+                st.dataframe(sentiments_df.style.format({'Sentiment Score': '{:.2f}'}))
 
         elif selected_tab == "Insights":
             st.header("Insights")
-            avg_sentiment = sentiments_df['Sentiment Score'].mean() if 'sentiments_df' in locals() else 0
+            avg_sentiment = float(sentiments_df['Sentiment Score'].mean()) if 'sentiments_df' in locals() and not sentiments_df.empty else 0.0
             st.write(f"💡 Average news sentiment: {avg_sentiment:.2f}. Positive sentiment often correlates with price uptrends.")
             st.write("Combining ML forecasts with sentiment can predict volatility—e.g., negative news may widen confidence bounds.")
     else:
