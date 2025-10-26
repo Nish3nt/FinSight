@@ -110,54 +110,61 @@ else:
 
         full_data = fetch_full_data(selected_ticker, start_date, end_date)
 
-        # Fetch real-time sentiment from Finnhub
+        # Fetch real-time sentiment from Alpha Vantage (free alternative)
         @st.cache_data(ttl=300)  # Cache for 5 minutes
         def fetch_real_time_sentiment(ticker):
             try:
-                api_key = st.secrets.get("FINNHUB_API_KEY", None)
+                api_key = st.secrets.get("ALPHA_VANTAGE_API_KEY", None)
                 if not api_key:
-                    st.warning("No FINNHUB_API_KEY found in secrets. Using sample data. Add it to .streamlit/secrets.toml.")
+                    st.warning("No ALPHA_VANTAGE_API_KEY found in secrets. Using yfinance fallback. Add it to .streamlit/secrets.toml like: ALPHA_VANTAGE_API_KEY = \"your_key_here\"")
                     raise ValueError("No API key found.")
-                url = f"https://finnhub.io/api/v1/news-sentiment?symbol={ticker}&token={api_key}"
+                url = f"https://www.alphavantage.co/query?function=NEWS_SENTIMENT&tickers={ticker}&apikey={api_key}"
                 response = requests.get(url)
                 if response.status_code != 200:
-                    raise ValueError(f"Finnhub API error: {response.status_code}")
+                    raise ValueError(f"Alpha Vantage API error: {response.status_code}")
                 data = response.json()
-                if 'sentiment' not in data:
+                if 'feed' not in data:
                     raise ValueError("No sentiment data returned.")
                 
                 # Extract sentiment scores and articles
                 posts = []
                 links = []
-                sentiment_data = data['sentiment']
-                avg_score = sentiment_data.get('score', {}).get('overall', 0.0)  # Pre-computed average
-                
-                # Use news articles for text (up to 10)
-                articles = data.get('news', [])[:10]
+                sentiment_scores = []
+                articles = data['feed'][:10]
                 for article in articles:
-                    title = article.get('headline', 'No title')
+                    title = article.get('title', 'No title')
                     summary = article.get('summary', '')
                     post = f"{title}: {summary[:100]}..."  # Shortened for display
                     posts.append(post)
                     links.append(article.get('url', '#'))
+                    
+                    # Extract sentiment score (e.g., from ticker_sentiment)
+                    ticker_sent = article.get('ticker_sentiment', [])
+                    score = 0.0
+                    if ticker_sent:
+                        for ts in ticker_sent:
+                            if ts['ticker'] == ticker:
+                                score = ts.get('ticker_sentiment_score', 0.0)  # Average score
+                    sentiment_scores.append(score)
+                
+                # Average sentiment score
+                avg_score = np.mean(sentiment_scores) if sentiment_scores else 0.0
                 
                 # Fallback if no articles
                 if not posts:
                     posts = [f"Average sentiment score for {ticker}: {avg_score}"]
                     links = ['#']
                 
-                return posts, links, avg_score  # Return posts + direct avg score
+                return posts, links, avg_score
             except Exception as e:
-                st.warning(f"Finnhub failed: {str(e)}. Using sample data.")
-                return (
-                    [
-                        "Sample: Positive earnings for AAPL.",
-                        "Sample: Bearish outlook on TSLA due to recalls.",
-                        "Sample: Neutral market news."
-                    ],
-                    ['#', '#', '#'],
-                    0.0  # Fallback avg
-                )
+                st.warning(f"Alpha Vantage failed: {str(e)}. Using yfinance fallback.")
+                # Fallback to yfinance news
+                ticker_obj = yf.Ticker(ticker)
+                news = ticker_obj.news[:10]
+                posts = [f"{article.get('title', 'No title')} - {article.get('publisher', 'Unknown')}" for article in news if article.get('title')]
+                links = [article.get('link', '#') for article in news]
+                avg_score = 0.0  # Default for fallback
+                return posts if posts else ["Sample: Neutral market news."], ['#'], avg_score
 
         sample_posts, links, avg_sentiment_from_api = fetch_real_time_sentiment(selected_ticker)
 
@@ -284,7 +291,7 @@ else:
                 st.dataframe(pred_df.style.format({'Predicted Price': '{:.2f}', 'Lower Bound': '{:.2f}', 'Upper Bound': '{:.2f}'}))
 
         elif selected_tab == "Sentiment":
-            st.header("Real-Time Sentiment Analysis (Finnhub News)")
+            st.header("Real-Time Sentiment Analysis (Alpha Vantage News)")
             sia = SentimentIntensityAnalyzer()
             sentiments = [sia.polarity_scores(text)['compound'] for text in sample_posts]
             sentiments_df = pd.DataFrame({'Post/News': sample_posts, 'Link': links, 'Sentiment Score': sentiments})
@@ -300,11 +307,11 @@ else:
             st.metric("Positive Count", pos)
             st.metric("Negative Count", neg)
             st.metric("Neutral Count", neu)
-            st.caption(f"Real-time data from Finnhub news for '{selected_ticker}'. Refresh for updates.")
+            st.caption(f"Real-time data from Alpha Vantage news for '{selected_ticker}'. Refresh for updates.")
 
         elif selected_tab == "Insights":
             st.header("Insights")
-            avg_sentiment = avg_sentiment_from_api  # Use Finnhub's direct score
+            avg_sentiment = avg_sentiment_from_api  # Use Alpha Vantage's direct score
             if avg_sentiment > 0.1:
                 sentiment_note = "🟢 Bullish sentiment detected—consider long positions if predictions align."
             elif avg_sentiment < -0.1:
