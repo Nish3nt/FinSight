@@ -74,7 +74,11 @@ else:
 
     if not data.empty:
         # Fetch full OHLC data for viz
-        full_data = yf.download(selected_ticker, start=start_date, end=end_date)
+        try:
+            full_data = yf.download(selected_ticker, start=start_date, end=end_date)
+        except Exception as e:
+            st.error(f"Error fetching OHLC data: {str(e)}. Using Adj Close data only.")
+            full_data = data  # Fallback to Adj Close data
 
         # Multi-page layout with tabs
         selected_tab = option_menu(
@@ -98,22 +102,27 @@ else:
             # KPI Metrics Dashboard
             st.header("Key Performance Indicators")
             col1, col2, col3 = st.columns(3)
-            current_price = full_data['Close'].iloc[-1]
-            change_7d = (current_price - full_data['Close'].iloc[-8]) / full_data['Close'].iloc[-8] * 100 if len(full_data) > 7 else 0
-            volatility = full_data['Close'].pct_change().std() * np.sqrt(252) * 100
+            current_price = full_data['Close'].iloc[-1] if 'Close' in full_data.columns else data['Adj Close'].iloc[-1]
+            change_7d = ((current_price - full_data['Close'].iloc[-8]) / full_data['Close'].iloc[-8] * 100 
+                         if len(full_data) > 7 and 'Close' in full_data.columns else 0)
+            volatility = (full_data['Close'].pct_change().std() * np.sqrt(252) * 100 
+                          if 'Close' in full_data.columns and len(full_data) > 1 else 0)
             col1.metric("Current Price", f"${current_price:.2f}")
             col2.metric("7-Day Change", f"{change_7d:.2f}%", delta_color="normal")
             col3.metric("Annual Volatility", f"{volatility:.2f}%")
 
             # OHLC Candlestick Chart
             st.header("OHLC Candlestick Chart")
-            fig_candle = go.Figure(data=[go.Candlestick(x=full_data.index,
-                                                       open=full_data['Open'],
-                                                       high=full_data['High'],
-                                                       low=full_data['Low'],
-                                                       close=full_data['Close'])])
-            fig_candle.update_layout(title=f'{selected_ticker} OHLC Prices')
-            st.plotly_chart(fig_candle)
+            if 'Open' in full_data.columns and 'High' in full_data.columns and 'Low' in full_data.columns and 'Close' in full_data.columns:
+                fig_candle = go.Figure(data=[go.Candlestick(x=full_data.index,
+                                                           open=full_data['Open'],
+                                                           high=full_data['High'],
+                                                           low=full_data['Low'],
+                                                           close=full_data['Close'])])
+                fig_candle.update_layout(title=f'{selected_ticker} OHLC Prices')
+                st.plotly_chart(fig_candle)
+            else:
+                st.warning("OHLC data unavailable. Candlestick chart not displayed.")
 
         elif selected_tab == "Predictions":
             st.header("Stock Price Prediction")
@@ -124,51 +133,61 @@ else:
             if model_type == "Prophet":
                 df_prophet = data.reset_index().rename(columns={'Date': 'ds', 'Adj Close': 'y'})
                 with st.spinner("Training Prophet model..."):
-                    m = Prophet(daily_seasonality=True, yearly_seasonality=True)
-                    m.fit(df_prophet)
-                future = m.make_future_dataframe(periods=future_days)
-                forecast = m.predict(future)
-                pred_df = forecast[['ds', 'yhat', 'yhat_lower', 'yhat_upper']].tail(future_days)
-                pred_df.columns = ['Date', 'Predicted Price', 'Lower Bound', 'Upper Bound']
-                fig_pred = plot_plotly(m, forecast)
-                st.plotly_chart(fig_pred)
-
+                    try:
+                        m = Prophet(daily_seasonality=True, yearly_seasonality=True)
+                        m.fit(df_prophet)
+                        future = m.make_future_dataframe(periods=future_days)
+                        forecast = m.predict(future)
+                        pred_df = forecast[['ds', 'yhat', 'yhat_lower', 'yhat_upper']].tail(future_days)
+                        pred_df.columns = ['Date', 'Predicted Price', 'Lower Bound', 'Upper Bound']
+                        fig_pred = plot_plotly(m, forecast)
+                        st.plotly_chart(fig_pred)
+                    except Exception as e:
+                        st.error(f"Prophet training failed: {str(e)}. Try a different date range.")
             else:  # LSTM
                 if len(data) < 60:
                     st.error("Need at least 60 days of data for LSTM.")
                 else:
                     with st.spinner("Training LSTM model..."):
-                        scaler = MinMaxScaler()
-                        scaled_data = scaler.fit_transform(data['Adj Close'].values.reshape(-1, 1))
-                        time_step = 60
-                        X, y = [], []
-                        for i in range(time_step, len(scaled_data)):
-                            X.append(scaled_data[i-time_step:i, 0])
-                            y.append(scaled_data[i, 0])
-                        X, y = np.array(X), np.array(y)
-                        X = X.reshape(X.shape[0], X.shape[1], 1)
-                        
-                        model = Sequential()
-                        model.add(LSTM(50, return_sequences=True, input_shape=(time_step, 1)))
-                        model.add(LSTM(50))
-                        model.add(Dense(1))
-                        model.compile(optimizer='adam', loss='mean_squared_error')
-                        model.fit(X, y, epochs=10, batch_size=32, verbose=0)
-                        
-                        # Predict
-                        predictions = []
-                        last_seq = scaled_data[-time_step:].reshape(1, time_step, 1)
-                        for _ in range(future_days):
-                            pred = model.predict(last_seq, verbose=0)[0][0]
-                            predictions.append(pred)
-                            last_seq = np.append(last_seq[:, 1:, :], [[[pred]]], axis=1)
-                        pred_df['Predicted Price'] = scaler.inverse_transform(np.array(predictions).reshape(-1, 1)).flatten()
-                        pred_df['Date'] = pd.date_range(start=data.index[-1] + pd.Timedelta(days=1), periods=future_days)
-                        
-                        fig_pred = px.line(pred_df, x='Date', y='Predicted Price', title='LSTM Future Price Predictions')
-                        st.plotly_chart(fig_pred)
+                        try:
+                            scaler = MinMaxScaler()
+                            scaled_data = scaler.fit_transform(data['Adj Close'].values.reshape(-1, 1))
+                            time_step = 60
+                            X, y = [], []
+                            for i in range(time_step, len(scaled_data)):
+                                X.append(scaled_data[i-time_step:i, 0])
+                                y.append(scaled_data[i, 0])
+                            X, y = np.array(X), np.array(y)
+                            X = X.reshape(X.shape[0], X.shape[1], 1)
+                            
+                            model = Sequential()
+                            model.add(LSTM(50, return_sequences=True, input_shape=(time_step, 1)))
+                            model.add(LSTM(50))
+                            model.add(Dense(1))
+                            model.compile(optimizer='adam', loss='mean_squared_error')
+                            model.fit(X, y, epochs=10, batch_size=32, verbose=0)
+                            
+                            # Predict
+                            predictions = []
+                            last_seq = scaled_data[-time_step:].reshape(1, time_step, 1)
+                            for _ in range(future_days):
+                                pred = model.predict(last_seq, verbose=0)[0][0]
+                                predictions.append(pred)
+                                last_seq = np.append(last_seq[:, 1:, :], [[[pred]]], axis=1)
+                            pred_df['Predicted Price'] = scaler.inverse_transform(np.array(predictions).reshape(-1, 1)).flatten()
+                            pred_df['Date'] = pd.date_range(start=data.index[-1] + pd.Timedelta(days=1), periods=future_days)
+                            
+                            fig_pred = px.line(pred_df, x='Date', y='Predicted Price', title='LSTM Future Price Predictions')
+                            st.plotly_chart(fig_pred)
+                        except Exception as e:
+                            st.error(f"LSTM training failed: {str(e)}. Using fallback prediction.")
+                            pred_df['Predicted Price'] = [data['Adj Close'].iloc[-1]] * future_days
+                            pred_df['Date'] = pd.date_range(start=data.index[-1] + pd.Timedelta(days=1), periods=future_days)
             
-            st.dataframe(pred_df)
+            if not pred_df.empty:
+                st.dataframe(pred_df)
+            else:
+                st.warning("No predictions available.")
 
         elif selected_tab == "Sentiment":
             st.header("Sentiment Analysis")
