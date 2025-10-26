@@ -11,6 +11,7 @@ import nltk
 from nltk.sentiment.vader import SentimentIntensityAnalyzer
 import joblib
 import os
+import requests
 from datetime import datetime
 from prophet import Prophet
 from prophet.plot import plot_plotly
@@ -52,7 +53,6 @@ else:
             if data.empty:
                 st.error(f"No data returned for {ticker}. Check ticker or date range.")
                 return pd.DataFrame()
-            # Flatten MultiIndex if present
             if isinstance(data.columns, pd.MultiIndex):
                 if all((col, ticker) in data.columns for col in ['Open', 'High', 'Low', 'Close', 'Adj Close']):
                     data = pd.DataFrame({
@@ -77,7 +77,7 @@ else:
     data = fetch_data(selected_ticker, start_date, end_date)
 
     if not data.empty:
-        # Fetch full OHLC data for viz with retry
+        # Fetch full OHLC data
         def fetch_full_data(ticker, start, end, max_retries=3):
             for attempt in range(max_retries):
                 try:
@@ -108,39 +108,32 @@ else:
 
         full_data = fetch_full_data(selected_ticker, start_date, end_date)
 
-        # Fetch news with retry
-        def fetch_news(ticker, max_retries=3):
-            for attempt in range(max_retries):
-                try:
-                    ticker_obj = yf.Ticker(ticker)
-                    news = ticker_obj.news
-                    if not news or not isinstance(news, list):
-                        raise ValueError("No news data returned.")
-                    # Filter and validate news items
-                    valid_news = []
-                    for article in news[:10]:
-                        title = article.get('title', article.get('description', 'No title available'))
-                        publisher = article.get('publisher', 'Unknown')
-                        valid_news.append(f"{title} - {publisher}")
-                    if not valid_news:
-                        raise ValueError("No valid news items found.")
-                    return valid_news, [article.get('link', '#') for article in news[:10]]
-                except Exception as e:
-                    if attempt == max_retries - 1:
-                        st.warning(f"Failed to fetch news after {max_retries} attempts: {str(e)}. Using sample data.")
-                        return (
-                            [
-                                "Apple releases new iPhone with great features.",
-                                "Microsoft faces antitrust lawsuit.",
-                                "Google AI advancements boost stock.",
-                                "Amazon reports record profits.",
-                                "Tesla recalls vehicles due to safety issues."
-                            ],
-                            ['#'] * 5
-                        )
-                    st.warning(f"Retry {attempt + 1}/{max_retries} for news: {str(e)}")
+        # Fetch real-time sentiment from X (Twitter) API v2
+        @st.cache_data(ttl=300)  # Cache for 5 minutes
+        def fetch_real_time_sentiment(ticker, max_retries=3):
+            try:
+                bearer_token = st.secrets.get("X_BEARER_TOKEN", "dummy_token")  # Add to Streamlit secrets
+                headers = {"Authorization": f"Bearer {bearer_token}"}
+                query = f"{ticker} stock sentiment -is:retweet"  # Exclude retweets for originality
+                url = f"https://api.twitter.com/2/tweets/search/recent?query={query}&max_results=10&tweet.fields=created_at,public_metrics,author_id"
+                response = requests.get(url, headers=headers)
+                if response.status_code != 200:
+                    raise ValueError(f"X API error: {response.status_code}")
+                tweets = response.json().get('data', [])
+                if not tweets:
+                    raise ValueError("No tweets found.")
+                posts = [tweet['text'] for tweet in tweets]
+                links = [f"https://twitter.com/i/status/{tweet['id']}" for tweet in tweets]
+                return posts, links
+            except Exception as e:
+                st.warning(f"X API failed: {str(e)}. Using yfinance news fallback.")
+                ticker_obj = yf.Ticker(ticker)
+                news = ticker_obj.news[:10]
+                posts = [f"{article.get('title', 'No title')} - {article.get('publisher', 'Unknown')}" for article in news if article.get('title')]
+                links = [article.get('link', '#') for article in news]
+                return posts if posts else ["Sample post: Positive market buzz."], ['#']
 
-        sample_news, links = fetch_news(selected_ticker)
+        sample_posts, links = fetch_real_time_sentiment(selected_ticker)
 
         # Multi-page layout with tabs
         selected_tab = option_menu(
@@ -212,6 +205,8 @@ else:
                         pred_df['Lower Bound'] = pred_df['Lower Bound'].astype(float)
                         pred_df['Upper Bound'] = pred_df['Upper Bound'].astype(float)
                         fig_pred = plot_plotly(m, forecast)
+                        # Customize colors: Teal for prediction, light teal for confidence
+                        fig_pred.update_traces(line_color='#26A69A', fill_color='#B2DFDB', name='Prophet Prediction')
                         st.plotly_chart(fig_pred)
                     except Exception as e:
                         st.error(f"Prophet training failed: {str(e)}. Try a different date range.")
@@ -248,44 +243,52 @@ else:
                             pred_df['Predicted Price'] = scaler.inverse_transform(np.array(predictions).reshape(-1, 1)).flatten()
                             pred_df['Date'] = pd.date_range(start=data.index[-1] + pd.Timedelta(days=1), periods=future_days)
                             
-                            fig_pred = px.line(pred_df, x='Date', y='Predicted Price', title='LSTM Future Price Predictions')
+                            # Customize color: Purple for LSTM prediction
+                            fig_pred = px.line(pred_df, x='Date', y='Predicted Price', title='LSTM Future Price Predictions', color_discrete_sequence=['#AB47BC'])
                             st.plotly_chart(fig_pred)
                         except Exception as e:
                             st.error(f"LSTM training failed: {str(e)}. Using fallback prediction.")
                             last_price = float(data['Adj Close'].iloc[-1])
                             pred_df['Predicted Price'] = [last_price] * future_days
                             pred_df['Date'] = pd.date_range(start=data.index[-1] + pd.Timedelta(days=1), periods=future_days)
+                            fig_pred = px.line(pred_df, x='Date', y='Predicted Price', title='LSTM Future Price Predictions', color_discrete_sequence=['#AB47BC'])
+                            st.plotly_chart(fig_pred)
             
             if not pred_df.empty:
                 st.dataframe(pred_df.style.format({'Predicted Price': '{:.2f}', 'Lower Bound': '{:.2f}', 'Upper Bound': '{:.2f}'}))
 
         elif selected_tab == "Sentiment":
-            st.header("Sentiment Analysis")
+            st.header("Real-Time Sentiment Analysis (X + News)")
             sia = SentimentIntensityAnalyzer()
-            try:
-                sentiments = [sia.polarity_scores(text)['compound'] for text in sample_news]
-                sentiments_df = pd.DataFrame({'News': sample_news, 'Link': links, 'Sentiment Score': sentiments})
-                
-                def color_sentiment(val):
-                    color = 'green' if val > 0.1 else 'red' if val < -0.1 else 'gray'
-                    return f'color: {color}'
-                st.dataframe(sentiments_df.style.applymap(color_sentiment, subset=['Sentiment Score']).format({'Sentiment Score': '{:.2f}'}))
+            sentiments = [sia.polarity_scores(text)['compound'] for text in sample_posts]
+            sentiments_df = pd.DataFrame({'Post/News': sample_posts, 'Link': links, 'Sentiment Score': sentiments})
+            
+            def color_sentiment(val):
+                color = 'green' if val > 0.1 else 'red' if val < -0.1 else 'gray'
+                return f'color: {color}'
+            st.dataframe(sentiments_df.style.applymap(color_sentiment, subset=['Sentiment Score']).format({'Sentiment Score': '{:.2f}'}))
 
-                pos = len([s for s in sentiments if s > 0.1])
-                neg = len([s for s in sentiments if s < -0.1])
-                neu = len(sentiments) - pos - neg
-                st.write(f"Positive news count: {pos}")
-                st.write(f"Negative news count: {neg}")
-                st.write(f"Neutral news count: {neu}")
-            except Exception as e:
-                st.error(f"Error processing sentiment: {str(e)}. Please try again later.")
+            pos = len([s for s in sentiments if s > 0.1])
+            neg = len([s for s in sentiments if s < -0.1])
+            neu = len(sentiments) - pos - neg
+            st.metric("Positive Count", pos)
+            st.metric("Negative Count", neg)
+            st.metric("Neutral Count", neu)
+            st.caption(f"Real-time data from X (Twitter) posts on '{selected_ticker} stock sentiment'. Refresh for updates.")
 
         elif selected_tab == "Insights":
             st.header("Insights")
-            avg_sentiment = float(sentiments_df['Sentiment Score'].mean()) if 'sentiments_df' in locals() and not sentiments_df.empty else 0.0
+            avg_sentiment = np.mean(sentiments) if sentiments else 0.0
+            if avg_sentiment > 0.1:
+                sentiment_note = "🟢 Bullish sentiment detected—consider long positions if predictions align."
+            elif avg_sentiment < -0.1:
+                sentiment_note = "🔴 Bearish sentiment—watch for downside risk in forecasts."
+            else:
+                sentiment_note = "⚪ Neutral sentiment—rely on technical indicators."
             if avg_sentiment == 0.0:
-                st.warning("No real-time sentiment data available. Using fallback value.")
-            st.write(f"💡 Average news sentiment: {avg_sentiment:.2f}. Positive sentiment often correlates with price uptrends.")
-            st.write("Combining ML forecasts with sentiment can predict volatility—e.g., negative news may widen confidence bounds.")
+                st.warning("Fallback data used; real-time sentiment unavailable.")
+            st.write(f"💡 Average sentiment score: {avg_sentiment:.2f}")
+            st.write(sentiment_note)
+            st.write("Real-time social buzz can amplify ML predictions—e.g., high positive scores narrow confidence intervals.")
     else:
         st.error("No data available for the selected parameters.")
