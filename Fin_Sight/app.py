@@ -45,7 +45,7 @@ else:
         end_date = current_date
         st.warning(f"End date set to today ({current_date}) as future dates are not available.")
 
-    # Fetch data
+    # Fetch data with validation
     @st.cache_data
     def fetch_data(ticker, start, end):
         try:
@@ -64,13 +64,14 @@ else:
                         'Adj Close': data[('Adj Close', ticker)]
                     })
                 else:
-                    # Fallback: Use xs to extract level 0 (field names)
                     data = data.xs('Adj Close', level=0, axis=1).to_frame(name='Adj Close') if 'Adj Close' in data.columns.levels[0] else pd.DataFrame()
             elif all(col in data.columns for col in ['Open', 'High', 'Low', 'Close', 'Adj Close']):
                 data = data[['Open', 'High', 'Low', 'Close', 'Adj Close']]
             else:
-                st.warning(f"Incomplete data for {ticker}. Using available columns.")
                 data = data[['Adj Close']] if 'Adj Close' in data.columns else pd.DataFrame()
+            if data.empty or 'Adj Close' not in data.columns:
+                st.error(f"Invalid data for {ticker}. Ensure date range has data.")
+                return pd.DataFrame()
             return data
         except Exception as e:
             st.error(f"Error fetching data for {ticker}: {str(e)}")
@@ -86,7 +87,6 @@ else:
                     full_data = yf.download(ticker, start=start, end=end, auto_adjust=False)
                     if full_data.empty:
                         raise ValueError("Full data empty.")
-                    # Fixed MultiIndex handling: Try tuple access, fallback to xs
                     if isinstance(full_data.columns, pd.MultiIndex):
                         field_cols = ['Open', 'High', 'Low', 'Close', 'Adj Close']
                         new_data = pd.DataFrame(index=full_data.index)
@@ -94,7 +94,6 @@ else:
                             if (col, ticker) in full_data.columns:
                                 new_data[col] = full_data[(col, ticker)]
                             else:
-                                # Fallback: Extract from level 0
                                 new_data[col] = full_data.xs(col, level=0, axis=1)
                         full_data = new_data
                     elif all(col in full_data.columns for col in ['Open', 'High', 'Low', 'Close', 'Adj Close']):
@@ -115,7 +114,7 @@ else:
         def fetch_real_time_sentiment(ticker):
             try:
                 # Replace with your Alpha Vantage API key
-                api_key = "D8VCWYUPOFJR8D52"  # Insert your key here (e.g., "ABC123XYZ")
+                api_key = "your_alphavantage_key_here"  # Insert your key here (e.g., "ABC123XYZ")
                 if not api_key or api_key == "your_alphavantage_key_here":
                     st.warning("Please replace 'your_alphavantage_key_here' with your Alpha Vantage API key in the code.")
                     raise ValueError("No valid API key provided.")
@@ -229,24 +228,27 @@ else:
             pred_df = pd.DataFrame()
 
             if model_type == "Prophet":
-                df_prophet = data.reset_index().rename(columns={'Date': 'ds', 'Adj Close': 'y'})
-                with st.spinner("Training Prophet model..."):
-                    try:
-                        m = Prophet(daily_seasonality=True, yearly_seasonality=True)
-                        m.fit(df_prophet)
-                        future = m.make_future_dataframe(periods=future_days)
-                        forecast = m.predict(future)
-                        pred_df = forecast[['ds', 'yhat', 'yhat_lower', 'yhat_upper']].tail(future_days)
-                        pred_df.columns = ['Date', 'Predicted Price', 'Lower Bound', 'Upper Bound']
-                        pred_df['Predicted Price'] = pred_df['Predicted Price'].astype(float)
-                        pred_df['Lower Bound'] = pred_df['Lower Bound'].astype(float)
-                        pred_df['Upper Bound'] = pred_df['Upper Bound'].astype(float)
-                        fig_pred = plot_plotly(m, forecast)
-                        # Customize colors: Teal for prediction, light teal for confidence
-                        fig_pred.update_traces(line_color='#26A69A', fill_color='#B2DFDB', name='Prophet Prediction')
-                        st.plotly_chart(fig_pred)
-                    except Exception as e:
-                        st.error(f"Prophet training failed: {str(e)}. Try a different date range.")
+                df_prophet = data.reset_index().rename(columns={'index': 'ds', 'Adj Close': 'y'})  # Use 'index' as ds
+                if df_prophet.empty or 'ds' not in df_prophet.columns or 'y' not in df_prophet.columns:
+                    st.error("Insufficient data for Prophet. Try a different date range with more data.")
+                else:
+                    with st.spinner("Training Prophet model..."):
+                        try:
+                            m = Prophet(daily_seasonality=True, yearly_seasonality=True)
+                            m.fit(df_prophet)
+                            future = m.make_future_dataframe(periods=future_days)
+                            forecast = m.predict(future)
+                            pred_df = forecast[['ds', 'yhat', 'yhat_lower', 'yhat_upper']].tail(future_days)
+                            pred_df.columns = ['Date', 'Predicted Price', 'Lower Bound', 'Upper Bound']
+                            pred_df['Predicted Price'] = pred_df['Predicted Price'].astype(float)
+                            pred_df['Lower Bound'] = pred_df['Lower Bound'].astype(float)
+                            pred_df['Upper Bound'] = pred_df['Upper Bound'].astype(float)
+                            fig_pred = plot_plotly(m, forecast)
+                            # Simplify fill customization to avoid Plotly errors
+                            fig_pred.update_traces(line_color='#26A69A', fill='tozeroy', name='Prophet Prediction')  # Use valid fill option
+                            st.plotly_chart(fig_pred)
+                        except Exception as e:
+                            st.error(f"Prophet training failed: {str(e)}. Try a different date range.")
             else:  # LSTM
                 if len(data) < 60:
                     st.error("Need at least 60 days of data for LSTM.")
@@ -322,8 +324,8 @@ else:
                 sentiment_note = "🔴 Bearish sentiment—watch for downside risk in forecasts."
             else:
                 sentiment_note = "⚪ Neutral sentiment—rely on technical indicators."
-            if avg_sentiment == 0.0:
-                st.warning("Fallback data used; real-time sentiment unavailable.")
+            if avg_sentiment == 0.0 and not sample_posts[0].startswith("Average sentiment score"):
+                st.warning("Fallback data used; real-time sentiment unavailable. Check API key or replace with a valid one.")
             st.write(f"💡 Average sentiment score: {avg_sentiment:.2f}")
             st.write(sentiment_note)
             st.write("Real-time news sentiment can amplify ML predictions—e.g., high positive scores narrow confidence intervals.")
