@@ -11,7 +11,7 @@ import nltk
 from nltk.sentiment.vader import SentimentIntensityAnalyzer
 import joblib
 import os
-import requests  # For API calls
+import requests
 from datetime import datetime
 from prophet import Prophet
 from prophet.plot import plot_plotly
@@ -45,7 +45,7 @@ else:
         end_date = current_date
         st.warning(f"End date set to today ({current_date}) as future dates are not available.")
 
-    # Fetch data (unchanged from previous)
+    # Fetch data
     @st.cache_data
     def fetch_data(ticker, start, end):
         try:
@@ -77,7 +77,7 @@ else:
     data = fetch_data(selected_ticker, start_date, end_date)
 
     if not data.empty:
-        # Fetch full OHLC data (unchanged)
+        # Fetch full OHLC data
         def fetch_full_data(ticker, start, end, max_retries=3):
             for attempt in range(max_retries):
                 try:
@@ -88,10 +88,10 @@ else:
                         if all((col, ticker) in full_data.columns for col in ['Open', 'High', 'Low', 'Close', 'Adj Close']):
                             full_data = pd.DataFrame({
                                 'Open': full_data[('Open', ticker)],
-                                'High': full_data[('High', ticker)],
-                                'Low': full_data[('Low', ticker)],
-                                'Close': full_data[('Close', ticker)],
-                                'Adj Close': full_data[('Adj Close', ticker)]
+                                'High': data[('High', ticker)],
+                                'Low': data[('Low', ticker)],
+                                'Close': data[('Close', ticker)],
+                                'Adj Close': data[('Adj Close', ticker)]
                             })
                         else:
                             full_data = full_data.xs('Close', axis=1, level=1, drop_level=True) if 'Close' in full_data.columns else full_data
@@ -108,34 +108,55 @@ else:
 
         full_data = fetch_full_data(selected_ticker, start_date, end_date)
 
-        # NEW: Fetch real-time sentiment from X (Twitter) API v2 (free tier)
-        @st.cache_data(ttl=300)  # Cache for 5 mins for real-time feel
-        def fetch_real_time_sentiment(ticker, max_retries=3):
+        # Fetch real-time sentiment from Finnhub
+        @st.cache_data(ttl=300)  # Cache for 5 minutes
+        def fetch_real_time_sentiment(ticker):
             try:
-                # X API v2 endpoint for recent search (replace BEARER_TOKEN with your free X API key from developer.twitter.com)
-                bearer_token = st.secrets.get("X_BEARER_TOKEN", "dummy_token")  # Add to Streamlit secrets
-                headers = {"Authorization": f"Bearer {bearer_token}"}
-                query = f"{ticker} stock sentiment"  # Semantic query for real-time buzz
-                url = f"https://api.twitter.com/2/tweets/search/recent?query={query}&max_results=10&tweet.fields=created_at,public_metrics,author_id"
-                response = requests.get(url, headers=headers)
+                api_key = st.secrets.get("FINNHUB_API_KEY", None)
+                if not api_key:
+                    raise ValueError("No API key found.")
+                url = f"https://finnhub.io/api/v1/news-sentiment?symbol={ticker}&token={api_key}"
+                response = requests.get(url)
                 if response.status_code != 200:
-                    raise ValueError(f"X API error: {response.status_code}")
-                tweets = response.json().get('data', [])
-                if not tweets:
-                    raise ValueError("No tweets found.")
-                posts = [tweet['text'] for tweet in tweets]
-                links = [f"https://twitter.com/i/status/{tweet['id']}" for tweet in tweets]
-                return posts, links
+                    raise ValueError(f"Finnhub API error: {response.status_code}")
+                data = response.json()
+                if 'sentiment' not in data:
+                    raise ValueError("No sentiment data returned.")
+                
+                # Extract sentiment scores and articles
+                posts = []
+                links = []
+                sentiment_data = data['sentiment']
+                avg_score = sentiment_data.get('score', {}).get('overall', 0.0)  # Pre-computed average
+                
+                # Use news articles for text (up to 10)
+                articles = data.get('news', [])[:10]
+                for article in articles:
+                    title = article.get('headline', 'No title')
+                    summary = article.get('summary', '')
+                    post = f"{title}: {summary[:100]}..."  # Shortened for display
+                    posts.append(post)
+                    links.append(article.get('url', '#'))
+                
+                # Fallback if no articles
+                if not posts:
+                    posts = [f"Average sentiment score for {ticker}: {avg_score}"]
+                    links = ['#']
+                
+                return posts, links, avg_score  # Return posts + direct avg score
             except Exception as e:
-                st.warning(f"X API failed: {str(e)}. Using yfinance news fallback.")
-                # Fallback to yfinance
-                ticker_obj = yf.Ticker(ticker)
-                news = ticker_obj.news[:10]
-                posts = [f"{article.get('title', 'No title')} - {article.get('publisher', 'Unknown')}" for article in news if article.get('title')]
-                links = [article.get('link', '#') for article in news]
-                return posts if posts else ["Sample post: Positive market buzz."], ['#']
+                st.warning(f"Finnhub failed: {str(e)}. Using sample data.")
+                return (
+                    [
+                        "Sample: Positive earnings for AAPL.",
+                        "Sample: Bearish outlook on TSLA due to recalls.",
+                        "Sample: Neutral market news."
+                    ],
+                    ['#', '#', '#'],
+                    0.0  # Fallback avg
+                )
 
-        sample_posts, links = fetch_real_time_sentiment(selected_ticker)
+        sample_posts, links, avg_sentiment_from_api = fetch_real_time_sentiment(selected_ticker)
 
         # Multi-page layout with tabs
         selected_tab = option_menu(
@@ -156,7 +177,7 @@ else:
             fig = px.line(data, x=data.index, y='Adj Close', title=f'{selected_ticker} Adjusted Close Price')
             st.plotly_chart(fig)
 
-            # KPI Metrics Dashboard (unchanged)
+            # KPI Metrics Dashboard
             st.header("Key Performance Indicators")
             col1, col2, col3 = st.columns(3)
             try:
@@ -174,7 +195,7 @@ else:
                 col2.metric("7-Day Change", "0.00%")
                 col3.metric("Annual Volatility", "0.00%")
 
-            # OHLC Candlestick Chart (unchanged)
+            # OHLC Candlestick Chart
             st.header("OHLC Candlestick Chart")
             if all(col in full_data.columns for col in ['Open', 'High', 'Low', 'Close']):
                 fig_candle = go.Figure(data=[go.Candlestick(x=full_data.index,
@@ -188,7 +209,6 @@ else:
                 st.warning("OHLC data unavailable. Candlestick chart not displayed due to data limitations.")
 
         elif selected_tab == "Predictions":
-            # Unchanged from previous
             st.header("Stock Price Prediction")
             model_type = st.selectbox("Model Type", ["Prophet", "LSTM"])
             future_days = st.slider("Predict for next N days", 1, 30, 5)
@@ -208,6 +228,8 @@ else:
                         pred_df['Lower Bound'] = pred_df['Lower Bound'].astype(float)
                         pred_df['Upper Bound'] = pred_df['Upper Bound'].astype(float)
                         fig_pred = plot_plotly(m, forecast)
+                        # Customize colors: Teal for prediction, light teal for confidence
+                        fig_pred.update_traces(line_color='#26A69A', fill_color='#B2DFDB', name='Prophet Prediction')
                         st.plotly_chart(fig_pred)
                     except Exception as e:
                         st.error(f"Prophet training failed: {str(e)}. Try a different date range.")
@@ -244,19 +266,22 @@ else:
                             pred_df['Predicted Price'] = scaler.inverse_transform(np.array(predictions).reshape(-1, 1)).flatten()
                             pred_df['Date'] = pd.date_range(start=data.index[-1] + pd.Timedelta(days=1), periods=future_days)
                             
-                            fig_pred = px.line(pred_df, x='Date', y='Predicted Price', title='LSTM Future Price Predictions')
+                            # Customize color: Purple for LSTM prediction
+                            fig_pred = px.line(pred_df, x='Date', y='Predicted Price', title='LSTM Future Price Predictions', color_discrete_sequence=['#AB47BC'])
                             st.plotly_chart(fig_pred)
                         except Exception as e:
                             st.error(f"LSTM training failed: {str(e)}. Using fallback prediction.")
                             last_price = float(data['Adj Close'].iloc[-1])
                             pred_df['Predicted Price'] = [last_price] * future_days
                             pred_df['Date'] = pd.date_range(start=data.index[-1] + pd.Timedelta(days=1), periods=future_days)
+                            fig_pred = px.line(pred_df, x='Date', y='Predicted Price', title='LSTM Future Price Predictions', color_discrete_sequence=['#AB47BC'])
+                            st.plotly_chart(fig_pred)
             
             if not pred_df.empty:
                 st.dataframe(pred_df.style.format({'Predicted Price': '{:.2f}', 'Lower Bound': '{:.2f}', 'Upper Bound': '{:.2f}'}))
 
         elif selected_tab == "Sentiment":
-            st.header("Real-Time Sentiment Analysis (X + News)")
+            st.header("Real-Time Sentiment Analysis (Finnhub News)")
             sia = SentimentIntensityAnalyzer()
             sentiments = [sia.polarity_scores(text)['compound'] for text in sample_posts]
             sentiments_df = pd.DataFrame({'Post/News': sample_posts, 'Link': links, 'Sentiment Score': sentiments})
@@ -272,11 +297,11 @@ else:
             st.metric("Positive Count", pos)
             st.metric("Negative Count", neg)
             st.metric("Neutral Count", neu)
-            st.caption(f"Real-time data from X (Twitter) posts on '{selected_ticker} stock sentiment'. Refresh for updates.")
+            st.caption(f"Real-time data from Finnhub news for '{selected_ticker}'. Refresh for updates.")
 
         elif selected_tab == "Insights":
             st.header("Insights")
-            avg_sentiment = np.mean(sentiments) if sentiments else 0.0
+            avg_sentiment = avg_sentiment_from_api  # Use Finnhub's direct score
             if avg_sentiment > 0.1:
                 sentiment_note = "🟢 Bullish sentiment detected—consider long positions if predictions align."
             elif avg_sentiment < -0.1:
@@ -287,6 +312,6 @@ else:
                 st.warning("Fallback data used; real-time sentiment unavailable.")
             st.write(f"💡 Average sentiment score: {avg_sentiment:.2f}")
             st.write(sentiment_note)
-            st.write("Real-time social buzz can amplify ML predictions—e.g., high positive scores narrow confidence intervals.")
+            st.write("Real-time news sentiment can amplify ML predictions—e.g., high positive scores narrow confidence intervals.")
     else:
         st.error("No data available for the selected parameters.")
