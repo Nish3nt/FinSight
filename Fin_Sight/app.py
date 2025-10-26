@@ -53,6 +53,7 @@ else:
             if data.empty:
                 st.error(f"No data returned for {ticker}. Check ticker or date range.")
                 return pd.DataFrame()
+            # Flatten MultiIndex if present
             if isinstance(data.columns, pd.MultiIndex):
                 if all((col, ticker) in data.columns for col in ['Open', 'High', 'Low', 'Close', 'Adj Close']):
                     data = pd.DataFrame({
@@ -63,7 +64,8 @@ else:
                         'Adj Close': data[('Adj Close', ticker)]
                     })
                 else:
-                    data = data.xs('Adj Close', axis=1, level=1, drop_level=True).rename(columns={ticker: 'Adj Close'})
+                    # Fallback: Use xs to extract level 0 (field names)
+                    data = data.xs('Adj Close', level=0, axis=1).to_frame(name='Adj Close') if 'Adj Close' in data.columns.levels[0] else pd.DataFrame()
             elif all(col in data.columns for col in ['Open', 'High', 'Low', 'Close', 'Adj Close']):
                 data = data[['Open', 'High', 'Low', 'Close', 'Adj Close']]
             else:
@@ -77,24 +79,24 @@ else:
     data = fetch_data(selected_ticker, start_date, end_date)
 
     if not data.empty:
-        # Fetch full OHLC data
+        # Fetch full OHLC data with fixed MultiIndex handling
         def fetch_full_data(ticker, start, end, max_retries=3):
             for attempt in range(max_retries):
                 try:
                     full_data = yf.download(ticker, start=start, end=end, auto_adjust=False)
                     if full_data.empty:
                         raise ValueError("Full data empty.")
+                    # Fixed MultiIndex handling: Try tuple access, fallback to xs
                     if isinstance(full_data.columns, pd.MultiIndex):
-                        if all((col, ticker) in full_data.columns for col in ['Open', 'High', 'Low', 'Close', 'Adj Close']):
-                            full_data = pd.DataFrame({
-                                'Open': full_data[('Open', ticker)],
-                                'High': data[('High', ticker)],
-                                'Low': data[('Low', ticker)],
-                                'Close': data[('Close', ticker)],
-                                'Adj Close': data[('Adj Close', ticker)]
-                            })
-                        else:
-                            full_data = full_data.xs('Close', axis=1, level=1, drop_level=True) if 'Close' in full_data.columns else full_data
+                        field_cols = ['Open', 'High', 'Low', 'Close', 'Adj Close']
+                        new_data = pd.DataFrame(index=full_data.index)
+                        for col in field_cols:
+                            if (col, ticker) in full_data.columns:
+                                new_data[col] = full_data[(col, ticker)]
+                            else:
+                                # Fallback: Extract from level 0
+                                new_data[col] = full_data.xs(col, level=0, axis=1)
+                        full_data = new_data
                     elif all(col in full_data.columns for col in ['Open', 'High', 'Low', 'Close', 'Adj Close']):
                         full_data = full_data[['Open', 'High', 'Low', 'Close', 'Adj Close']]
                     else:
@@ -114,6 +116,7 @@ else:
             try:
                 api_key = st.secrets.get("FINNHUB_API_KEY", None)
                 if not api_key:
+                    st.warning("No FINNHUB_API_KEY found in secrets. Using sample data. Add it to .streamlit/secrets.toml.")
                     raise ValueError("No API key found.")
                 url = f"https://finnhub.io/api/v1/news-sentiment?symbol={ticker}&token={api_key}"
                 response = requests.get(url)
