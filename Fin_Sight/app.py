@@ -117,23 +117,21 @@ else:
                 # Replace with your Alpha Vantage API key
                 api_key = "D8VCWYUPOFJR8D52"  # Insert your key here (e.g., "ABC123XYZ")
                 if not api_key or api_key == "your_alphavantage_key_here":
-                    st.warning("Please replace 'your_alphavantage_key_here' with a valid Alpha Vantage API key. Get one at https://www.alphavantage.co/support/#api-key and restart the app after updating.")
+                    st.warning("Please replace 'your_alphavantage_key_here' with your Alpha Vantage API key in the code (get it from https://www.alphavantage.co/support/#api-key).")
                     raise ValueError("No valid API key provided.")
                 url = f"https://www.alphavantage.co/query?function=NEWS_SENTIMENT&tickers={ticker}&apikey={api_key}"
-                response = requests.get(url, timeout=10)  # Add timeout to handle network issues
+                response = requests.get(url)
                 if response.status_code != 200:
-                    raise ValueError(f"Alpha Vantage API error: Status code {response.status_code}")
+                    raise ValueError(f"Alpha Vantage API error: {response.status_code}")
                 data = response.json()
-                if 'feed' not in data or not data.get('feed'):
-                    raise ValueError("No sentiment data returned in API response. Check API key or rate limits.")
+                if 'feed' not in data:
+                    raise ValueError("No sentiment data returned.")
                 
                 # Extract sentiment scores and articles
                 posts = []
                 links = []
                 sentiment_scores = []
                 articles = data['feed'][:10]
-                if not articles:
-                    raise ValueError("No articles found in API response.")
                 for article in articles:
                     title = article.get('title', 'No title')
                     summary = article.get('summary', '')
@@ -156,6 +154,7 @@ else:
                 valid_scores = [s for s in sentiment_scores if isinstance(s, (int, float)) and not np.isnan(s)]
                 avg_score = np.mean(valid_scores) if valid_scores else 0.0
                 
+                # Fallback if no articles
                 if not posts:
                     posts = [f"Average sentiment score for {ticker}: {avg_score}"]
                     links = ['#']
@@ -173,11 +172,11 @@ else:
 
         sample_posts, links, avg_sentiment_from_api = fetch_real_time_sentiment(selected_ticker)
 
-        # Multi-page layout with tabs (Insights removed)
+        # Multi-page layout with tabs
         selected_tab = option_menu(
             menu_title=None,
-            options=["Data & Viz", "Predictions", "Sentiment"],
-            icons=["table", "graph-up", "chat-dots"],
+            options=["Data & Viz", "Predictions", "Sentiment", "Insights"],
+            icons=["table", "graph-up", "chat-dots", "lightbulb"],
             orientation="horizontal"
         )
 
@@ -313,9 +312,21 @@ else:
             st.metric("Positive Count", pos)
             st.metric("Negative Count", neg)
             st.metric("Neutral Count", neu)
-            if "Alpha Vantage failed" in st.session_state.get('warnings', ''):
-                st.caption("Note: Sentiment data is based on yfinance fallback due to API issues. Replace the API key or clear cache for real-time data.")
+            st.caption(f"Real-time data from Alpha Vantage news for '{selected_ticker}'. Refresh for updates.")
+
+        elif selected_tab == "Insights":
+            st.header("Insights")
+            avg_sentiment = avg_sentiment_from_api  # Use Alpha Vantage's direct score
+            if avg_sentiment > 0.1:
+                sentiment_note = "🟢 Bullish sentiment detected—consider long positions if predictions align."
+            elif avg_sentiment < -0.1:
+                sentiment_note = "🔴 Bearish sentiment—watch for downside risk in forecasts."
             else:
-                st.caption(f"Real-time data from Alpha Vantage news for '{selected_ticker}'. Refresh for updates.")
+                sentiment_note = "⚪ Neutral sentiment—rely on technical indicators."
+            if avg_sentiment == 0.0 and not sample_posts[0].startswith("Average sentiment score"):
+                st.warning("Fallback data used; real-time sentiment unavailable. Check API key or replace with a valid one from https://www.alphavantage.co/support/#api-key.")
+            st.write(f"💡 Average sentiment score: {avg_sentiment:.2f}")
+            st.write(sentiment_note)
+            st.write("Real-time news sentiment can amplify ML predictions—e.g., high positive scores narrow confidence intervals.")
     else:
         st.error("No data available for the selected parameters.")
