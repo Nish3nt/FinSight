@@ -15,7 +15,7 @@ from tensorflow.keras.layers import LSTM, Dense
 from sklearn.preprocessing import MinMaxScaler
 from streamlit_option_menu import option_menu
 
-# ====================== SETUP ======================
+# ====================== INITIAL SETUP ======================
 nltk.download('vader_lexicon', quiet=True)
 current_date = datetime.now().date()
 
@@ -37,7 +37,33 @@ if end_date > current_date:
     end_date = current_date
     st.warning(f"End date capped at today: {current_date}")
 
-# ====================== DATA FETCH ======================
+# ====================== FETCH TICKER OBJECT ======================
+@st.cache_resource(ttl=300)
+def get_ticker(ticker):
+    return yf.Ticker(ticker)
+
+ticker_obj = get_ticker(selected_ticker)
+
+# ====================== FETCH YAHOO NEWS (FOR TICKER) ======================
+@st.cache_data(ttl=300)
+def get_yahoo_headlines(ticker):
+    try:
+        news = ticker_obj.news
+        if not news or len(news) == 0:
+            return ["No recent headlines."]
+        headlines = []
+        for item in news[:15]:
+            title = item.get('title', '').strip()
+            pub = item.get('publisher', 'Source').strip()
+            if title:
+                headlines.append(f"**{title}** – {pub}")
+        return headlines if headlines else ["Market quiet."]
+    except:
+        return ["News feed temporarily unavailable."]
+
+news_headlines = get_yahoo_headlines(selected_ticker)  # NOW DEFINED
+
+# ====================== FETCH STOCK DATA ======================
 @st.cache_data(ttl=600)
 def fetch_stock_data(ticker, start, end):
     try:
@@ -52,11 +78,11 @@ def fetch_stock_data(ticker, start, end):
             df['Adj Close'] = df['Close']
         df = df[required].dropna(how='all')
         if len(df) < 30:
-            st.warning("Need 30+ days.")
+            st.warning("Need 30+ days of data.")
             return None
         return df
     except Exception as e:
-        st.error(f"Data error: {e}")
+        st.error(f"Data fetch error: {e}")
         return None
 
 data_main = fetch_stock_data(selected_ticker, start_date, end_date)
@@ -65,47 +91,46 @@ data_compare = fetch_stock_data(compare_ticker, start_date, end_date)
 if data_main is None or data_compare is None:
     st.stop()
 
-# ====================== ALPHA VANTAGE SENTIMENT ======================
+# ====================== ALPHA VANTAGE SENTIMENT (ONLY) ======================
 @st.cache_data(ttl=300)
 def get_alpha_sentiment(ticker):
     try:
-        api_key = "D8VCWYUPOFJR8D52"  # Replace with your key
-        if api_key == "your_alphavantage_key_here":
-            st.warning("Add your Alpha Vantage key to see real sentiment!")
+        api_key = "D8VCWYUPOFJR8D52"  # REPLACE THIS
+        if not api_key or api_key == "YOUR_ALPHA_VANTAGE_KEY":
+            st.warning("Alpha Vantage key missing. Using fallback.")
             raise ValueError("No key")
-        url = f"https://www.alphavantage.co/query?function=NEWS_SENTIMENT&tickers={ticker}&apikey={api_key}"
+        url = f"https://www.alphavantage.co/query?function=NEWS_SENTIMENT&tickers={ticker}&limit=10&apikey={api_key}"
         r = requests.get(url, timeout=10)
         if r.status_code != 200:
-            raise ValueError("API error")
+            raise ValueError(f"API error: {r.status_code}")
         j = r.json()
         feed = j.get('feed', [])
         if not feed:
-            raise ValueError("No news")
+            raise ValueError("No news in feed")
         posts, links, scores = [], [], []
-        for art in feed[:10]:
+        for art in feed:
             title = art.get('title', 'News')
             summary = art.get('summary', '')[:120]
             posts.append(f"{title}: {summary}...")
             links.append(art.get('url', '#'))
             # Extract score
-            ts = art.get('ticker_sentiment', [])
             score = 0.0
-            for s in ts:
-                if s['ticker'] == ticker:
+            for ts in art.get('ticker_sentiment', []):
+                if ts.get('ticker') == ticker:
                     try:
-                        score = float(s.get('ticker_sentiment_score', 0))
+                        score = float(ts.get('ticker_sentiment_score', 0))
                     except:
                         score = 0.0
             scores.append(score)
         return posts, links, scores
-    except:
-        # yfinance fallback
-        news = yf.Ticker(ticker).news[:10]
+    except Exception as e:
+        st.info("Alpha Vantage failed. Using yfinance news.")
+        news = ticker_obj.news[:10]
         posts = [f"{n.get('title','News')} – {n.get('publisher','Source')}" for n in news]
         links = [n.get('link','#') for n in news]
         return posts, links, [0.0] * len(posts)
 
-main_posts, main_links, main_scores = get_alpha_sentiment(selected_ticker)
+alpha_posts, alpha_links, alpha_scores = get_alpha_sentiment(selected_ticker)
 
 # ====================== TABS ======================
 tab = option_menu(
@@ -185,32 +210,29 @@ elif tab == "Predictions":
     else:
         st.error("Not enough data.")
 
-# ====================== SENTIMENT ======================
+# ====================== SENTIMENT (ALPHA VANTAGE ONLY) ======================
 elif tab == "Sentiment":
-    st.subheader("News Sentiment")
-    sia = SentimentIntensityAnalyzer()
-    scores = [sia.polarity_scores(p)['compound'] for p in main_posts]
-    df = pd.DataFrame({'News': main_posts, 'Link': main_links, 'Score': scores})
+    st.subheader("News Sentiment (Alpha Vantage)")
+    df = pd.DataFrame({'News': alpha_posts, 'Link': alpha_links, 'Score': alpha_scores})
 
     def color(val):
         return f"color: {'green' if val > 0.1 else 'red' if val < -0.1 else 'gray'}"
     st.dataframe(df.style.applymap(color, subset=['Score']).format({'Score': '{:.3f}'}), use_container_width=True)
 
-    pos = sum(1 for s in scores if s > 0.1)
-    neg = sum(1 for s in scores if s < -0.1)
-    neu = len(scores) - pos - neg
+    pos = sum(1 for s in alpha_scores if s > 0.1)
+    neg = sum(1 for s in alpha_scores if s < -0.1)
+    neu = len(alpha_scores) - pos - neg
     c1, c2, c3 = st.columns(3)
     c1.metric("Positive", pos)
     c2.metric("Negative", neg)
     c3.metric("Neutral", neu)
 
-    st.caption("Real-time sentiment from Alpha Vantage news.")
+    st.caption("Real-time sentiment from Alpha Vantage API.")
 
-# ====================== COMPARISON TAB ======================
+# ====================== COMPARISON ======================
 elif tab == "Comparison":
     st.subheader(f"**{selected_ticker} vs {compare_ticker}**")
 
-    # Normalize prices to percentage change
     base_main = data_main['Adj Close'].iloc[0]
     base_compare = data_compare['Adj Close'].iloc[0]
     df_main = (data_main['Adj Close'] / base_main - 1) * 100
@@ -219,10 +241,9 @@ elif tab == "Comparison":
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=data_main.index, y=df_main, name=selected_ticker, line=dict(color='#26A69A')))
     fig.add_trace(go.Scatter(x=data_compare.index, y=df_compare, name=compare_ticker, line=dict(color='#AB47BC')))
-    fig.update_layout(title="Performance Comparison (%)", height=600, template="plotly_white")
+    fig.update_layout(title="Performance (%)", height=600, template="plotly_white")
     st.plotly_chart(fig, use_container_width=True)
 
-    # Key stats
     ret_main = (data_main['Adj Close'].iloc[-1] / base_main - 1) * 100
     ret_compare = (data_compare['Adj Close'].iloc[-1] / base_compare - 1) * 100
     vol_main = data_main['Adj Close'].pct_change().std() * np.sqrt(252) * 100
@@ -231,34 +252,34 @@ elif tab == "Comparison":
     c1, c2, c3, c4 = st.columns(4)
     c1.metric(f"{selected_ticker} Return", f"{ret_main:+.2f}%")
     c2.metric(f"{compare_ticker} Return", f"{ret_compare:+.2f}%")
-    c3.metric(f"{selected_ticker} Volatility", f"{vol_main:.1f}%")
-    c4.metric(f"{compare_ticker} Volatility", f"{vol_compare:.1f}%")
+    c3.metric(f"{selected_ticker} Vol", f"{vol_main:.1f}%")
+    c4.metric(f"{compare_ticker} Vol", f"{vol_compare:.1f}%")
 
-# ====================== VERTICAL NEWS TICKER (BOTTOM) ======================
+# ====================== VERTICAL NEWS TICKER (YAHOO) ======================
 st.markdown("---")
-st.markdown("### Latest Market Headlines")
+st.markdown("### Latest Market Headlines (Yahoo Finance)")
 
 st.markdown("""
 <style>
 .news-container {
-    height: 240px;
+    height: 260px;
     overflow: hidden;
     background: #0f172a;
-    padding: 15px;
-    border-radius: 12px;
-    box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+    padding: 16px;
+    border-radius: 14px;
+    box-shadow: 0 6px 24px rgba(0,0,0,0.3);
     color: white;
     font-family: 'Segoe UI', sans-serif;
 }
 .news-scroll {
-    animation: scroll-up 30s linear infinite;
+    animation: scroll-up 35s linear infinite;
 }
 @keyframes scroll-up {
     0% { transform: translateY(0); }
     100% { transform: translateY(-100%); }
 }
 .news-item {
-    padding: 10px 0;
+    padding: 11px 0;
     border-bottom: 1px solid #334155;
     font-size: 15px;
     line-height: 1.6;
@@ -269,7 +290,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-all_headlines = news_headlines + news_headlines  # Loop
+all_headlines = news_headlines + news_headlines
 
 with st.container():
     st.markdown('<div class="news-container">', unsafe_allow_html=True)
