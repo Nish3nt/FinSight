@@ -11,7 +11,6 @@ import nltk
 from nltk.sentiment.vader import SentimentIntensityAnalyzer
 import joblib
 import os
-import requests
 from datetime import datetime
 from prophet import Prophet
 from prophet.plot import plot_plotly
@@ -28,6 +27,41 @@ current_date = datetime.now().date()
 
 # Title of the app
 st.title("FinSight: Advanced Stock Analysis Dashboard")
+
+# Fetch ticker object for news ticker (global for reuse)
+ticker_obj = yf.Ticker(selected_ticker)
+
+# News Ticker - Scrolling headlines at the top
+st.markdown("""
+<style>
+.news-ticker {
+    background-color: #f0f2f6;
+    padding: 10px;
+    border-radius: 5px;
+    overflow: hidden;
+    white-space: nowrap;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+.news-ticker:hover {
+    animation-play-state: paused;
+}
+@keyframes scroll {
+    0% { transform: translateX(100%); }
+    100% { transform: translateX(-100%); }
+}
+.ticker-content {
+    display: inline-block;
+    animation: scroll 30s linear infinite;
+}
+</style>
+""", unsafe_allow_html=True)
+
+news = ticker_obj.news[:10]  # Fetch top 10 news items
+if news:
+    headlines = " | ".join([f"{article['title']} ({article['publisher']})" for article in news])
+    st.markdown(f'<div class="news-ticker"><span class="ticker-content">{headlines}</span></div>', unsafe_allow_html=True)
+else:
+    st.markdown('<div class="news-ticker"><span class="ticker-content">No recent news available. Select a different stock or check back later.</span></div>', unsafe_allow_html=True)
 
 # Sidebar for user input
 st.sidebar.header("User Input")
@@ -110,26 +144,30 @@ else:
 
         full_data = fetch_full_data(selected_ticker, start_date, end_date)
 
-        # Fetch real-time sentiment from Alpha Vantage (hardcoded key) - Kept for Sentiment tab
+        # Fetch real-time sentiment from Alpha Vantage (hardcoded key)
         @st.cache_data(ttl=300)  # Cache for 5 minutes
         def fetch_real_time_sentiment(ticker):
             try:
+                # Replace with your Alpha Vantage API key
                 api_key = "D8VCWYUPOFJR8D52"  # Insert your key here (e.g., "ABC123XYZ")
                 if not api_key or api_key == "your_alphavantage_key_here":
                     st.warning("Please replace 'your_alphavantage_key_here' with a valid Alpha Vantage API key. Get one at https://www.alphavantage.co/support/#api-key and restart the app after updating.")
                     raise ValueError("No valid API key provided.")
                 url = f"https://www.alphavantage.co/query?function=NEWS_SENTIMENT&tickers={ticker}&apikey={api_key}"
-                response = requests.get(url)
+                response = requests.get(url, timeout=10)  # Add timeout to handle network issues
                 if response.status_code != 200:
                     raise ValueError(f"Alpha Vantage API error: Status code {response.status_code}")
                 data = response.json()
-                if 'feed' not in data:
-                    raise ValueError("No sentiment data returned in API response.")
+                if 'feed' not in data or not data.get('feed'):
+                    raise ValueError("No sentiment data returned in API response. Check API key or rate limits.")
                 
+                # Extract sentiment scores and articles
                 posts = []
                 links = []
                 sentiment_scores = []
                 articles = data['feed'][:10]
+                if not articles:
+                    raise ValueError("No articles found in API response.")
                 for article in articles:
                     title = article.get('title', 'No title')
                     summary = article.get('summary', '')
@@ -137,6 +175,7 @@ else:
                     posts.append(post)
                     links.append(article.get('url', '#'))
                     
+                    # Extract and validate sentiment score
                     ticker_sent = article.get('ticker_sentiment', [])
                     score = 0.0
                     if ticker_sent:
@@ -144,9 +183,10 @@ else:
                             if ts['ticker'] == ticker:
                                 score_value = ts.get('ticker_sentiment_score', None)
                                 if score_value is not None and isinstance(score_value, (int, float)):
-                                    score = float(score_value)
+                                    score = float(score_value)  # Ensure numeric
                     sentiment_scores.append(score)
                 
+                # Compute average only with valid numeric scores
                 valid_scores = [s for s in sentiment_scores if isinstance(s, (int, float)) and not np.isnan(s)]
                 avg_score = np.mean(valid_scores) if valid_scores else 0.0
                 
@@ -157,11 +197,12 @@ else:
                 return posts, links, avg_score
             except Exception as e:
                 st.warning(f"Alpha Vantage failed: {str(e)}. Using yfinance fallback.")
+                # Fallback to yfinance news
                 ticker_obj = yf.Ticker(ticker)
                 news = ticker_obj.news[:10]
                 posts = [f"{article.get('title', 'No title')} - {article.get('publisher', 'Unknown')}" for article in news if article.get('title')]
                 links = [article.get('link', '#') for article in news]
-                avg_score = 0.0
+                avg_score = 0.0  # Default for fallback
                 return posts if posts else ["Sample: Neutral market news."], ['#'], avg_score
 
         sample_posts, links, avg_sentiment_from_api = fetch_real_time_sentiment(selected_ticker)
@@ -306,6 +347,9 @@ else:
             st.metric("Positive Count", pos)
             st.metric("Negative Count", neg)
             st.metric("Neutral Count", neu)
-            st.caption(f"Real-time data from Alpha Vantage news for '{selected_ticker}'. Refresh for updates.")
+            if "Alpha Vantage failed" in st.session_state.get('warnings', ''):
+                st.caption("Note: Sentiment data is based on yfinance fallback due to API issues. Replace the API key or clear cache for real-time data.")
+            else:
+                st.caption(f"Real-time data from Alpha Vantage news for '{selected_ticker}'. Refresh for updates.")
     else:
         st.error("No data available for the selected parameters.")
