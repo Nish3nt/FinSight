@@ -25,7 +25,8 @@ st.title("**FinSight**: Real-Time Stock Intelligence")
 # ====================== SIDEBAR ======================
 st.sidebar.header("Controls")
 tickers = ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'TSLA', 'NVDA', 'META', 'NFLX', 'AMD', 'JPM', 'V', 'XOM']
-selected_ticker = st.sidebar.selectbox("Stock Ticker", tickers)
+selected_ticker = st.sidebar.selectbox("Main Stock", tickers)
+compare_ticker = st.sidebar.selectbox("Compare With", tickers, index=1)
 start_date = st.sidebar.date_input("Start Date", pd.to_datetime('2018-01-01').date())
 end_date = st.sidebar.date_input("End Date", current_date)
 
@@ -34,39 +35,15 @@ if start_date > end_date:
     st.stop()
 if end_date > current_date:
     end_date = current_date
-    st.warning(f"End date set to today: {current_date}")
+    st.warning(f"End date capped at today: {current_date}")
 
-# ====================== TICKER & NEWS ======================
-@st.cache_resource(ttl=300)
-def get_ticker(ticker):
-    return yf.Ticker(ticker)
-
-ticker_obj = get_ticker(selected_ticker)
-
-# Fetch news safely
-def get_news():
-    try:
-        news = ticker_obj.news
-        if not news or len(news) == 0:
-            return ["No news available at this time."]
-        headlines = []
-        for item in news[:15]:  # Top 15
-            title = item.get('title', '').strip()
-            pub = item.get('publisher', 'Source').strip()
-            if title:
-                headlines.append(f"**{title}** – {pub}")
-        return headlines if headlines else ["Market quiet. No major headlines."]
-    except:
-        return ["News feed temporarily down."]
-news_headlines = get_news()
-
-# ====================== DATA FETCH (BULLETPROOF) ======================
+# ====================== DATA FETCH ======================
 @st.cache_data(ttl=600)
 def fetch_stock_data(ticker, start, end):
     try:
         df = yf.download(ticker, start=start, end=end, progress=False)
         if df.empty:
-            st.error("No data found.")
+            st.error(f"No data for {ticker}.")
             return None
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.droplevel(1)
@@ -79,66 +56,97 @@ def fetch_stock_data(ticker, start, end):
             return None
         return df
     except Exception as e:
-        st.error(f"Error: {e}")
+        st.error(f"Data error: {e}")
         return None
 
-data = fetch_stock_data(selected_ticker, start_date, end_date)
-if data is None:
+data_main = fetch_stock_data(selected_ticker, start_date, end_date)
+data_compare = fetch_stock_data(compare_ticker, start_date, end_date)
+
+if data_main is None or data_compare is None:
     st.stop()
 
-full_data = data.copy()
-
-# ====================== SENTIMENT ======================
+# ====================== ALPHA VANTAGE SENTIMENT ======================
 @st.cache_data(ttl=300)
-def get_sentiment_news():
+def get_alpha_sentiment(ticker):
     try:
-        news = ticker_obj.news[:10]
+        api_key = "D8VCWYUPOFJR8D52"  # Replace with your key
+        if api_key == "your_alphavantage_key_here":
+            st.warning("Add your Alpha Vantage key to see real sentiment!")
+            raise ValueError("No key")
+        url = f"https://www.alphavantage.co/query?function=NEWS_SENTIMENT&tickers={ticker}&apikey={api_key}"
+        r = requests.get(url, timeout=10)
+        if r.status_code != 200:
+            raise ValueError("API error")
+        j = r.json()
+        feed = j.get('feed', [])
+        if not feed:
+            raise ValueError("No news")
+        posts, links, scores = [], [], []
+        for art in feed[:10]:
+            title = art.get('title', 'News')
+            summary = art.get('summary', '')[:120]
+            posts.append(f"{title}: {summary}...")
+            links.append(art.get('url', '#'))
+            # Extract score
+            ts = art.get('ticker_sentiment', [])
+            score = 0.0
+            for s in ts:
+                if s['ticker'] == ticker:
+                    try:
+                        score = float(s.get('ticker_sentiment_score', 0))
+                    except:
+                        score = 0.0
+            scores.append(score)
+        return posts, links, scores
+    except:
+        # yfinance fallback
+        news = yf.Ticker(ticker).news[:10]
         posts = [f"{n.get('title','News')} – {n.get('publisher','Source')}" for n in news]
         links = [n.get('link','#') for n in news]
-        return posts, links
-    except:
-        return ["News unavailable."], ['#']
+        return posts, links, [0.0] * len(posts)
 
-sample_posts, links = get_sentiment_news()
+main_posts, main_links, main_scores = get_alpha_sentiment(selected_ticker)
 
 # ====================== TABS ======================
 tab = option_menu(
     menu_title=None,
-    options=["Data & Viz", "Predictions", "Sentiment"],
-    icons=["table", "graph-up", "chat-dots"],
+    options=["Data & Viz", "Predictions", "Sentiment", "Comparison"],
+    icons=["table", "graph-up", "chat-dots", "arrow-left-right"],
     orientation="horizontal"
 )
 
-# ====================== MAIN CONTENT ======================
+# ====================== DATA & VIZ ======================
 if tab == "Data & Viz":
     st.subheader(f"**{selected_ticker}** – Price History")
-    st.dataframe(data.tail(100), use_container_width=True)
-    st.download_button("Download CSV", data.to_csv().encode(), f"{selected_ticker}.csv")
+    st.dataframe(data_main.tail(100), use_container_width=True)
+    st.download_button("Download CSV", data_main.to_csv().encode(), f"{selected_ticker}.csv")
 
-    st.plotly_chart(px.line(data, x=data.index, y='Adj Close', title="Price Trend"), use_container_width=True)
+    fig = px.line(data_main, x=data_main.index, y='Adj Close', title="Price Trend")
+    st.plotly_chart(fig, use_container_width=True)
 
     c1, c2, c3 = st.columns(3)
     try:
-        close = data['Close'].iloc[-1]
-        change = (close - data['Close'].iloc[-8]) / data['Close'].iloc[-8] * 100 if len(data) > 7 else 0
-        vol = data['Close'].pct_change().std() * np.sqrt(252) * 100
+        close = data_main['Close'].iloc[-1]
+        change = (close - data_main['Close'].iloc[-8]) / data_main['Close'].iloc[-8] * 100 if len(data_main) > 7 else 0
+        vol = data_main['Close'].pct_change().std() * np.sqrt(252) * 100
         c1.metric("Price", f"${close:,.2f}")
-        c2.metric("7D Change", f"{change:+.2f}%")
+        c2.metric("7D Δ", f"{change:+.2f}%")
         c3.metric("Volatility", f"{vol:.1f}%")
     except:
         c1.metric("Price", "N/A")
 
-    fig_c = go.Figure(go.Candlestick(x=data.index, open=data['Open'], high=data['High'], low=data['Low'], close=data['Close']))
+    fig_c = go.Figure(go.Candlestick(x=data_main.index, open=data_main['Open'], high=data_main['High'], low=data_main['Low'], close=data_main['Close']))
     st.plotly_chart(fig_c.update_layout(title="Candlestick", height=600), use_container_width=True)
 
+# ====================== PREDICTIONS ======================
 elif tab == "Predictions":
     st.subheader("Price Forecast")
     model = st.selectbox("Model", ["Prophet", "LSTM"])
     days = st.slider("Days", 1, 30, 7)
 
-    if model == "Prophet" and len(data) >= 30:
+    if model == "Prophet" and len(data_main) >= 30:
         with st.spinner("Running Prophet..."):
-            df_p = data.reset_index()[['Date', 'Adj Close']].rename(columns={'Date': 'ds', 'Adj Close': 'y'})
+            df_p = data_main.reset_index()[['Date', 'Adj Close']].rename(columns={'Date': 'ds', 'Adj Close': 'y'})
             m = Prophet()
             m.fit(df_p)
             future = m.make_future_dataframe(periods=days)
@@ -149,10 +157,10 @@ elif tab == "Predictions":
             st.plotly_chart(fig, use_container_width=True)
             st.dataframe(pred.style.format({"Predicted": "{:.2f}"}))
 
-    elif model == "LSTM" and len(data) >= 60:
+    elif model == "LSTM" and len(data_main) >= 60:
         with st.spinner("Training LSTM..."):
             scaler = MinMaxScaler()
-            scaled = scaler.fit_transform(data['Adj Close'].values.reshape(-1,1))
+            scaled = scaler.fit_transform(data_main['Adj Close'].values.reshape(-1,1))
             X, y = [], []
             for i in range(60, len(scaled)):
                 X.append(scaled[i-60:i, 0])
@@ -169,18 +177,20 @@ elif tab == "Predictions":
                 preds.append(p)
                 last = np.append(last[:,1:,:], [[[p]]], axis=1)
             pred_vals = scaler.inverse_transform(np.array(preds).reshape(-1,1)).flatten()
-            pred_df = pd.DataFrame({'Date': pd.date_range(start=data.index[-1]+pd.Timedelta(days=1), periods=days), 'Predicted': pred_vals})
-            st.plotly_chart(px.line(pred_df, x='Date', y='Predicted', title="LSTM Forecast"), use_container_width=True)
+            pred_df = pd.DataFrame({'Date': pd.date_range(start=data_main.index[-1]+pd.Timedelta(days=1), periods=days), 'Predicted': pred_vals})
+            fig = px.line(pred_df, x='Date', y='Predicted', title="LSTM Forecast")
+            st.plotly_chart(fig, use_container_width=True)
             st.dataframe(pred_df.style.format({"Predicted": "{:.2f}"}))
 
     else:
         st.error("Not enough data.")
 
+# ====================== SENTIMENT ======================
 elif tab == "Sentiment":
     st.subheader("News Sentiment")
     sia = SentimentIntensityAnalyzer()
-    scores = [sia.polarity_scores(p)['compound'] for p in sample_posts]
-    df = pd.DataFrame({'News': sample_posts, 'Link': links, 'Score': scores})
+    scores = [sia.polarity_scores(p)['compound'] for p in main_posts]
+    df = pd.DataFrame({'News': main_posts, 'Link': main_links, 'Score': scores})
 
     def color(val):
         return f"color: {'green' if val > 0.1 else 'red' if val < -0.1 else 'gray'}"
@@ -194,35 +204,64 @@ elif tab == "Sentiment":
     c2.metric("Negative", neg)
     c3.metric("Neutral", neu)
 
+    st.caption("Real-time sentiment from Alpha Vantage news.")
+
+# ====================== COMPARISON TAB ======================
+elif tab == "Comparison":
+    st.subheader(f"**{selected_ticker} vs {compare_ticker}**")
+
+    # Normalize prices to percentage change
+    base_main = data_main['Adj Close'].iloc[0]
+    base_compare = data_compare['Adj Close'].iloc[0]
+    df_main = (data_main['Adj Close'] / base_main - 1) * 100
+    df_compare = (data_compare['Adj Close'] / base_compare - 1) * 100
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=data_main.index, y=df_main, name=selected_ticker, line=dict(color='#26A69A')))
+    fig.add_trace(go.Scatter(x=data_compare.index, y=df_compare, name=compare_ticker, line=dict(color='#AB47BC')))
+    fig.update_layout(title="Performance Comparison (%)", height=600, template="plotly_white")
+    st.plotly_chart(fig, use_container_width=True)
+
+    # Key stats
+    ret_main = (data_main['Adj Close'].iloc[-1] / base_main - 1) * 100
+    ret_compare = (data_compare['Adj Close'].iloc[-1] / base_compare - 1) * 100
+    vol_main = data_main['Adj Close'].pct_change().std() * np.sqrt(252) * 100
+    vol_compare = data_compare['Adj Close'].pct_change().std() * np.sqrt(252) * 100
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric(f"{selected_ticker} Return", f"{ret_main:+.2f}%")
+    c2.metric(f"{compare_ticker} Return", f"{ret_compare:+.2f}%")
+    c3.metric(f"{selected_ticker} Volatility", f"{vol_main:.1f}%")
+    c4.metric(f"{compare_ticker} Volatility", f"{vol_compare:.1f}%")
+
 # ====================== VERTICAL NEWS TICKER (BOTTOM) ======================
 st.markdown("---")
 st.markdown("### Latest Market Headlines")
 
-# CSS for vertical scroll
 st.markdown("""
 <style>
 .news-container {
-    height: 220px;
+    height: 240px;
     overflow: hidden;
     background: #0f172a;
-    padding: 12px;
+    padding: 15px;
     border-radius: 12px;
     box-shadow: 0 4px 20px rgba(0,0,0,0.3);
     color: white;
     font-family: 'Segoe UI', sans-serif;
 }
 .news-scroll {
-    animation: scroll-up 25s linear infinite;
+    animation: scroll-up 30s linear infinite;
 }
 @keyframes scroll-up {
     0% { transform: translateY(0); }
     100% { transform: translateY(-100%); }
 }
 .news-item {
-    padding: 8px 0;
+    padding: 10px 0;
     border-bottom: 1px solid #334155;
-    font-size: 14px;
-    line-height: 1.5;
+    font-size: 15px;
+    line-height: 1.6;
 }
 .news-item:last-child {
     border-bottom: none;
@@ -230,8 +269,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# Duplicate headlines for seamless loop
-all_headlines = news_headlines + news_headlines
+all_headlines = news_headlines + news_headlines  # Loop
 
 with st.container():
     st.markdown('<div class="news-container">', unsafe_allow_html=True)
@@ -240,4 +278,4 @@ with st.container():
         st.markdown(f'<div class="news-item">{h}</div>', unsafe_allow_html=True)
     st.markdown('</div></div>', unsafe_allow_html=True)
 
-st.caption("News sourced from Yahoo Finance • Updates every 5 minutes")
+st.caption("News from Yahoo Finance • Updates every 5 minutes")
