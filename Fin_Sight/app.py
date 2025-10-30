@@ -2,15 +2,10 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
-from sklearn.model_selection import train_test_split
 import plotly.express as px
 import plotly.graph_objects as go
 import nltk
 from nltk.sentiment.vader import SentimentIntensityAnalyzer
-import joblib
-import os
 import requests
 from datetime import datetime
 from prophet import Prophet
@@ -20,292 +15,288 @@ from tensorflow.keras.layers import LSTM, Dense
 from sklearn.preprocessing import MinMaxScaler
 from streamlit_option_menu import option_menu
 
-# Download NLTK data for VADER
+# ====================== INITIAL SETUP ======================
 nltk.download('vader_lexicon', quiet=True)
-
-# Set current date for validation
 current_date = datetime.now().date()
 
-# Title of the app
-st.title("FinSight: Advanced Stock Analysis Dashboard")
+st.set_page_config(page_title="FinSight", layout="wide")
+st.title("**FinSight**: Real-Time Stock Intelligence")
 
-# Sidebar for user input
-st.sidebar.header("User Input")
-tickers = ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'TSLA']
-selected_ticker = st.sidebar.selectbox("Select Stock Ticker", tickers)
+# ====================== SIDEBAR ======================
+st.sidebar.header("Controls")
+tickers = ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'TSLA', 'NVDA', 'META', 'NFLX', 'AMD', 'JPM', 'V', 'XOM']
+selected_ticker = st.sidebar.selectbox("Main Stock", tickers)
+compare_ticker = st.sidebar.selectbox("Compare With", tickers, index=1)
 start_date = st.sidebar.date_input("Start Date", pd.to_datetime('2018-01-01').date())
 end_date = st.sidebar.date_input("End Date", current_date)
 
-# Validate date range
 if start_date > end_date:
-    st.error("Error: Start date must be before or equal to end date.")
+    st.error("Start date must be before end date.")
     st.stop()
-else:
-    if end_date > current_date:
-        end_date = current_date
-        st.warning(f"End date set to today ({current_date}) as future dates are not available.")
+if end_date > current_date:
+    end_date = current_date
+    st.warning(f"End date capped at today: {current_date}")
 
-    # Fetch data with validation and minimum data check (lowered to 30 days for Prophet)
-    @st.cache_data
-    def fetch_data(ticker, start, end):
-        try:
-            data = yf.download(ticker, start=start, end=end, auto_adjust=False)
-            if data.empty:
-                st.error(f"No data returned for {ticker}. Check ticker or date range.")
-                return pd.DataFrame()
-            # Flatten MultiIndex if present
-            if isinstance(data.columns, pd.MultiIndex):
-                if all((col, ticker) in data.columns for col in ['Open', 'High', 'Low', 'Close', 'Adj Close']):
-                    data = pd.DataFrame({
-                        'Open': data[('Open', ticker)],
-                        'High': data[('High', ticker)],
-                        'Low': data[('Low', ticker)],
-                        'Close': data[('Close', ticker)],
-                        'Adj Close': data[('Adj Close', ticker)]
-                    })
-                else:
-                    # Fallback: Use xs to extract level 0 (field names)
-                    data = data.xs('Adj Close', level=0, axis=1).to_frame(name='Adj Close') if 'Adj Close' in data.columns.levels[0] else pd.DataFrame()
-            elif all(col in data.columns for col in ['Open', 'High', 'Low', 'Close', 'Adj Close']):
-                data = data[['Open', 'High', 'Low', 'Close', 'Adj Close']]
-            else:
-                data = data[['Adj Close']] if 'Adj Close' in data.columns else pd.DataFrame()
-            if data.empty or len(data) < 30:  # Minimum 30 days for Prophet
-                st.warning(f"Insufficient data ({len(data) if not data.empty else 0} days) for {ticker}. Try a longer date range (e.g., 2018-01-01 to today).")
-                return pd.DataFrame()
-            return data
-        except Exception as e:
-            st.error(f"Error fetching data for {ticker}: {str(e)}")
-            return pd.DataFrame()
+# ====================== FETCH TICKER OBJECT ======================
+@st.cache_resource(ttl=300)
+def get_ticker(ticker):
+    return yf.Ticker(ticker)
 
-    data = fetch_data(selected_ticker, start_date, end_date)
+ticker_obj = get_ticker(selected_ticker)
 
-    if not data.empty:
-        # Fetch full OHLC data with fixed MultiIndex handling
-        def fetch_full_data(ticker, start, end, max_retries=3):
-            for attempt in range(max_retries):
-                try:
-                    full_data = yf.download(ticker, start=start, end=end, auto_adjust=False)
-                    if full_data.empty:
-                        raise ValueError("Full data empty.")
-                    if isinstance(full_data.columns, pd.MultiIndex):
-                        field_cols = ['Open', 'High', 'Low', 'Close', 'Adj Close']
-                        new_data = pd.DataFrame(index=full_data.index)
-                        for col in field_cols:
-                            if (col, ticker) in full_data.columns:
-                                new_data[col] = full_data[(col, ticker)]
-                            else:
-                                new_data[col] = full_data.xs(col, level=0, axis=1)
-                        full_data = new_data
-                    elif all(col in full_data.columns for col in ['Open', 'High', 'Low', 'Close', 'Adj Close']):
-                        full_data = full_data[['Open', 'High', 'Low', 'Close', 'Adj Close']]
-                    else:
-                        raise ValueError("Missing OHLC columns.")
-                    return full_data
-                except Exception as e:
-                    if attempt == max_retries - 1:
-                        st.warning(f"Failed to fetch OHLC data after {max_retries} attempts: {str(e)}. Using Adj Close data.")
-                        return data.copy()
-                    st.warning(f"Retry {attempt + 1}/{max_retries} for OHLC data: {str(e)}")
+# ====================== FETCH YAHOO NEWS (FOR TICKER) ======================
+@st.cache_data(ttl=300)
+def get_yahoo_headlines(ticker):
+    try:
+        news = ticker_obj.news
+        if not news or len(news) == 0:
+            return ["No recent headlines."]
+        headlines = []
+        for item in news[:15]:
+            title = item.get('title', '').strip()
+            pub = item.get('publisher', 'Source').strip()
+            if title:
+                headlines.append(f"**{title}** – {pub}")
+        return headlines if headlines else ["Market quiet."]
+    except:
+        return ["News feed temporarily unavailable."]
 
-        full_data = fetch_full_data(selected_ticker, start_date, end_date)
+news_headlines = get_yahoo_headlines(selected_ticker)  # NOW DEFINED
 
-        # Fetch real-time sentiment from Alpha Vantage (hardcoded key) - Kept for Sentiment tab
-        @st.cache_data(ttl=300)  # Cache for 5 minutes
-        def fetch_real_time_sentiment(ticker):
-            try:
-                api_key = "D8VCWYUPOFJR8D52"  # Insert your key here (e.g., "ABC123XYZ")
-                if not api_key or api_key == "your_alphavantage_key_here":
-                    st.warning("Please replace 'your_alphavantage_key_here' with a valid Alpha Vantage API key. Get one at https://www.alphavantage.co/support/#api-key and restart the app after updating.")
-                    raise ValueError("No valid API key provided.")
-                url = f"https://www.alphavantage.co/query?function=NEWS_SENTIMENT&tickers={ticker}&apikey={api_key}"
-                response = requests.get(url)
-                if response.status_code != 200:
-                    raise ValueError(f"Alpha Vantage API error: Status code {response.status_code}")
-                data = response.json()
-                if 'feed' not in data:
-                    raise ValueError("No sentiment data returned in API response.")
-                
-                posts = []
-                links = []
-                sentiment_scores = []
-                articles = data['feed'][:10]
-                for article in articles:
-                    title = article.get('title', 'No title')
-                    summary = article.get('summary', '')
-                    post = f"{title}: {summary[:100]}..."  # Shortened for display
-                    posts.append(post)
-                    links.append(article.get('url', '#'))
-                    
-                    ticker_sent = article.get('ticker_sentiment', [])
-                    score = 0.0
-                    if ticker_sent:
-                        for ts in ticker_sent:
-                            if ts['ticker'] == ticker:
-                                score_value = ts.get('ticker_sentiment_score', None)
-                                if score_value is not None and isinstance(score_value, (int, float)):
-                                    score = float(score_value)
-                    sentiment_scores.append(score)
-                
-                valid_scores = [s for s in sentiment_scores if isinstance(s, (int, float)) and not np.isnan(s)]
-                avg_score = np.mean(valid_scores) if valid_scores else 0.0
-                
-                if not posts:
-                    posts = [f"Average sentiment score for {ticker}: {avg_score}"]
-                    links = ['#']
-                
-                return posts, links, avg_score
-            except Exception as e:
-                st.warning(f"Alpha Vantage failed: {str(e)}. Using yfinance fallback.")
-                ticker_obj = yf.Ticker(ticker)
-                news = ticker_obj.news[:10]
-                posts = [f"{article.get('title', 'No title')} - {article.get('publisher', 'Unknown')}" for article in news if article.get('title')]
-                links = [article.get('link', '#') for article in news]
-                avg_score = 0.0
-                return posts if posts else ["Sample: Neutral market news."], ['#'], avg_score
+# ====================== FETCH STOCK DATA ======================
+@st.cache_data(ttl=600)
+def fetch_stock_data(ticker, start, end):
+    try:
+        df = yf.download(ticker, start=start, end=end, progress=False)
+        if df.empty:
+            st.error(f"No data for {ticker}.")
+            return None
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.droplevel(1)
+        required = ['Open', 'High', 'Low', 'Close', 'Adj Close']
+        if 'Adj Close' not in df.columns and 'Close' in df.columns:
+            df['Adj Close'] = df['Close']
+        df = df[required].dropna(how='all')
+        if len(df) < 30:
+            st.warning("Need 30+ days of data.")
+            return None
+        return df
+    except Exception as e:
+        st.error(f"Data fetch error: {e}")
+        return None
 
-        sample_posts, links, avg_sentiment_from_api = fetch_real_time_sentiment(selected_ticker)
+data_main = fetch_stock_data(selected_ticker, start_date, end_date)
+data_compare = fetch_stock_data(compare_ticker, start_date, end_date)
 
-        # Multi-page layout with tabs (Insights removed)
-        selected_tab = option_menu(
-            menu_title=None,
-            options=["Data & Viz", "Predictions", "Sentiment"],
-            icons=["table", "graph-up", "chat-dots"],
-            orientation="horizontal"
-        )
+if data_main is None or data_compare is None:
+    st.stop()
 
-        if selected_tab == "Data & Viz":
-            st.header(f"Stock Data for {selected_ticker}")
-            st.dataframe(data)
-            csv = data.to_csv().encode('utf-8')
-            st.download_button("Download Data", csv, f"{selected_ticker}_data.csv", "text/csv")
-            
-            # Stock Price Visualization
-            st.header("Stock Price Visualization")
-            fig = px.line(data, x=data.index, y='Adj Close', title=f'{selected_ticker} Adjusted Close Price')
-            st.plotly_chart(fig)
+# ====================== ALPHA VANTAGE SENTIMENT (ONLY) ======================
+@st.cache_data(ttl=300)
+def get_alpha_sentiment(ticker):
+    try:
+        api_key = "D8VCWYUPOFJR8D52"  # REPLACE THIS
+        if not api_key or api_key == "YOUR_ALPHA_VANTAGE_KEY":
+            st.warning("Alpha Vantage key missing. Using fallback.")
+            raise ValueError("No key")
+        url = f"https://www.alphavantage.co/query?function=NEWS_SENTIMENT&tickers={ticker}&limit=10&apikey={api_key}"
+        r = requests.get(url, timeout=10)
+        if r.status_code != 200:
+            raise ValueError(f"API error: {r.status_code}")
+        j = r.json()
+        feed = j.get('feed', [])
+        if not feed:
+            raise ValueError("No news in feed")
+        posts, links, scores = [], [], []
+        for art in feed:
+            title = art.get('title', 'News')
+            summary = art.get('summary', '')[:120]
+            posts.append(f"{title}: {summary}...")
+            links.append(art.get('url', '#'))
+            # Extract score
+            score = 0.0
+            for ts in art.get('ticker_sentiment', []):
+                if ts.get('ticker') == ticker:
+                    try:
+                        score = float(ts.get('ticker_sentiment_score', 0))
+                    except:
+                        score = 0.0
+            scores.append(score)
+        return posts, links, scores
+    except Exception as e:
+        st.info("Alpha Vantage failed. Using yfinance news.")
+        news = ticker_obj.news[:10]
+        posts = [f"{n.get('title','News')} – {n.get('publisher','Source')}" for n in news]
+        links = [n.get('link','#') for n in news]
+        return posts, links, [0.0] * len(posts)
 
-            # KPI Metrics Dashboard
-            st.header("Key Performance Indicators")
-            col1, col2, col3 = st.columns(3)
-            try:
-                current_price = float(full_data['Close'].iloc[-1]) if 'Close' in full_data.columns and not full_data.empty else float(data['Adj Close'].iloc[-1])
-                change_7d = ((current_price - float(full_data['Close'].iloc[-8])) / float(full_data['Close'].iloc[-8]) * 100 
-                            if len(full_data) > 7 and 'Close' in full_data.columns else 0.0)
-                volatility = (full_data['Close'].pct_change().std() * np.sqrt(252) * 100 
-                            if 'Close' in full_data.columns and len(full_data) > 1 else 0.0)
-                col1.metric("Current Price", f"${current_price:.2f}")
-                col2.metric("7-Day Change", f"{change_7d:.2f}%")
-                col3.metric("Annual Volatility", f"{volatility:.2f}%")
-            except (ValueError, IndexError, TypeError) as e:
-                st.warning(f"Error calculating metrics: {str(e)}. Using default values.")
-                col1.metric("Current Price", "$0.00")
-                col2.metric("7-Day Change", "0.00%")
-                col3.metric("Annual Volatility", "0.00%")
+alpha_posts, alpha_links, alpha_scores = get_alpha_sentiment(selected_ticker)
 
-            # OHLC Candlestick Chart
-            st.header("OHLC Candlestick Chart")
-            if all(col in full_data.columns for col in ['Open', 'High', 'Low', 'Close']):
-                fig_candle = go.Figure(data=[go.Candlestick(x=full_data.index,
-                                                           open=full_data['Open'],
-                                                           high=full_data['High'],
-                                                           low=full_data['Low'],
-                                                           close=full_data['Close'])])
-                fig_candle.update_layout(title=f'{selected_ticker} OHLC Prices')
-                st.plotly_chart(fig_candle)
-            else:
-                st.warning("OHLC data unavailable. Candlestick chart not displayed due to data limitations.")
+# ====================== TABS ======================
+tab = option_menu(
+    menu_title=None,
+    options=["Data & Viz", "Predictions", "Sentiment", "Comparison"],
+    icons=["table", "graph-up", "chat-dots", "arrow-left-right"],
+    orientation="horizontal"
+)
 
-        elif selected_tab == "Predictions":
-            st.header("Stock Price Prediction")
-            model_type = st.selectbox("Model Type", ["Prophet", "LSTM"])
-            future_days = st.slider("Predict for next N days", 1, 30, 5)
-            pred_df = pd.DataFrame()
+# ====================== DATA & VIZ ======================
+if tab == "Data & Viz":
+    st.subheader(f"**{selected_ticker}** – Price History")
+    st.dataframe(data_main.tail(100), use_container_width=True)
+    st.download_button("Download CSV", data_main.to_csv().encode(), f"{selected_ticker}.csv")
 
-            if model_type == "Prophet":
-                df_prophet = data.reset_index().rename(columns={data.index.name: 'ds', 'Adj Close': 'y'})  # Robust index rename
-                if df_prophet.empty or 'ds' not in df_prophet.columns or 'y' not in df_prophet.columns or len(df_prophet) < 30:
-                    st.error("Insufficient data for Prophet. Try a date range with at least 30 days of data (e.g., 2018-01-01 to today).")
-                else:
-                    with st.spinner("Training Prophet model..."):
-                        try:
-                            m = Prophet(daily_seasonality=True, yearly_seasonality=True)
-                            m.fit(df_prophet)
-                            future = m.make_future_dataframe(periods=future_days)
-                            forecast = m.predict(future)
-                            pred_df = forecast[['ds', 'yhat', 'yhat_lower', 'yhat_upper']].tail(future_days)
-                            pred_df.columns = ['Date', 'Predicted Price', 'Lower Bound', 'Upper Bound']
-                            pred_df['Predicted Price'] = pred_df['Predicted Price'].astype(float)
-                            pred_df['Lower Bound'] = pred_df['Lower Bound'].astype(float)
-                            pred_df['Upper Bound'] = pred_df['Upper Bound'].astype(float)
-                            fig_pred = plot_plotly(m, forecast)
-                            fig_pred.update_traces(line_color='#26A69A', fill='tozeroy', name='Prophet Prediction')  # Valid fill option
-                            st.plotly_chart(fig_pred)
-                        except Exception as e:
-                            st.error(f"Prophet training failed: {str(e)}. Try a different date range.")
-            else:  # LSTM
-                if len(data) < 60:
-                    st.error("Need at least 60 days of data for LSTM.")
-                else:
-                    with st.spinner("Training LSTM model..."):
-                        try:
-                            scaler = MinMaxScaler()
-                            scaled_data = scaler.fit_transform(data['Adj Close'].values.reshape(-1, 1))
-                            time_step = 60
-                            X, y = [], []
-                            for i in range(time_step, len(scaled_data)):
-                                X.append(scaled_data[i-time_step:i, 0])
-                                y.append(scaled_data[i, 0])
-                            X, y = np.array(X), np.array(y)
-                            X = X.reshape((X.shape[0], X.shape[1], 1))
-                            
-                            model = Sequential()
-                            model.add(LSTM(50, return_sequences=True, input_shape=(time_step, 1)))
-                            model.add(LSTM(50))
-                            model.add(Dense(1))
-                            model.compile(optimizer='adam', loss='mean_squared_error')
-                            model.fit(X, y, epochs=5, batch_size=32, verbose=0)
-                            
-                            # Predict
-                            predictions = []
-                            last_seq = scaled_data[-time_step:].reshape(1, time_step, 1)
-                            for _ in range(future_days):
-                                pred = model.predict(last_seq, verbose=0)[0][0]
-                                predictions.append(pred)
-                                last_seq = np.append(last_seq[:, 1:, :], [[[pred]]], axis=1)
-                            pred_df['Predicted Price'] = scaler.inverse_transform(np.array(predictions).reshape(-1, 1)).flatten()
-                            pred_df['Date'] = pd.date_range(start=data.index[-1] + pd.Timedelta(days=1), periods=future_days)
-                            
-                            fig_pred = px.line(pred_df, x='Date', y='Predicted Price', title='LSTM Future Price Predictions', color_discrete_sequence=['#AB47BC'])
-                            st.plotly_chart(fig_pred)
-                        except Exception as e:
-                            st.error(f"LSTM training failed: {str(e)}. Using fallback prediction.")
-                            last_price = float(data['Adj Close'].iloc[-1])
-                            pred_df['Predicted Price'] = [last_price] * future_days
-                            pred_df['Date'] = pd.date_range(start=data.index[-1] + pd.Timedelta(days=1), periods=future_days)
-                            fig_pred = px.line(pred_df, x='Date', y='Predicted Price', title='LSTM Future Price Predictions', color_discrete_sequence=['#AB47BC'])
-                            st.plotly_chart(fig_pred)
-            
-            if not pred_df.empty:
-                st.dataframe(pred_df.style.format({'Predicted Price': '{:.2f}', 'Lower Bound': '{:.2f}', 'Upper Bound': '{:.2f}'}))
+    fig = px.line(data_main, x=data_main.index, y='Adj Close', title="Price Trend")
+    st.plotly_chart(fig, use_container_width=True)
 
-        elif selected_tab == "Sentiment":
-            st.header("Real-Time Sentiment Analysis (Alpha Vantage News)")
-            sia = SentimentIntensityAnalyzer()
-            sentiments = [sia.polarity_scores(text)['compound'] for text in sample_posts]
-            sentiments_df = pd.DataFrame({'Post/News': sample_posts, 'Link': links, 'Sentiment Score': sentiments})
-            
-            def color_sentiment(val):
-                color = 'green' if val > 0.1 else 'red' if val < -0.1 else 'gray'
-                return f'color: {color}'
-            st.dataframe(sentiments_df.style.applymap(color_sentiment, subset=['Sentiment Score']).format({'Sentiment Score': '{:.2f}'}))
+    c1, c2, c3 = st.columns(3)
+    try:
+        close = data_main['Close'].iloc[-1]
+        change = (close - data_main['Close'].iloc[-8]) / data_main['Close'].iloc[-8] * 100 if len(data_main) > 7 else 0
+        vol = data_main['Close'].pct_change().std() * np.sqrt(252) * 100
+        c1.metric("Price", f"${close:,.2f}")
+        c2.metric("7D Δ", f"{change:+.2f}%")
+        c3.metric("Volatility", f"{vol:.1f}%")
+    except:
+        c1.metric("Price", "N/A")
 
-            pos = len([s for s in sentiments if s > 0.1])
-            neg = len([s for s in sentiments if s < -0.1])
-            neu = len(sentiments) - pos - neg
-            st.metric("Positive Count", pos)
-            st.metric("Negative Count", neg)
-            st.metric("Neutral Count", neu)
-            st.caption(f"Real-time data from Alpha Vantage news for '{selected_ticker}'. Refresh for updates.")
+    fig_c = go.Figure(go.Candlestick(x=data_main.index, open=data_main['Open'], high=data_main['High'], low=data_main['Low'], close=data_main['Close']))
+    st.plotly_chart(fig_c.update_layout(title="Candlestick", height=600), use_container_width=True)
+
+# ====================== PREDICTIONS ======================
+elif tab == "Predictions":
+    st.subheader("Price Forecast")
+    model = st.selectbox("Model", ["Prophet", "LSTM"])
+    days = st.slider("Days", 1, 30, 7)
+
+    if model == "Prophet" and len(data_main) >= 30:
+        with st.spinner("Running Prophet..."):
+            df_p = data_main.reset_index()[['Date', 'Adj Close']].rename(columns={'Date': 'ds', 'Adj Close': 'y'})
+            m = Prophet()
+            m.fit(df_p)
+            future = m.make_future_dataframe(periods=days)
+            forecast = m.predict(future)
+            pred = forecast[['ds', 'yhat']].tail(days)
+            pred.columns = ['Date', 'Predicted']
+            fig = plot_plotly(m, forecast)
+            st.plotly_chart(fig, use_container_width=True)
+            st.dataframe(pred.style.format({"Predicted": "{:.2f}"}))
+
+    elif model == "LSTM" and len(data_main) >= 60:
+        with st.spinner("Training LSTM..."):
+            scaler = MinMaxScaler()
+            scaled = scaler.fit_transform(data_main['Adj Close'].values.reshape(-1,1))
+            X, y = [], []
+            for i in range(60, len(scaled)):
+                X.append(scaled[i-60:i, 0])
+                y.append(scaled[i, 0])
+            X, y = np.array(X), np.array(y)
+            X = X.reshape((X.shape[0], 60, 1))
+            lstm = Sequential([LSTM(50, return_sequences=True, input_shape=(60,1)), LSTM(50), Dense(1)])
+            lstm.compile('adam', 'mse')
+            lstm.fit(X, y, epochs=3, batch_size=32, verbose=0)
+            last = scaled[-60:].reshape(1,60,1)
+            preds = []
+            for _ in range(days):
+                p = lstm.predict(last, verbose=0)[0][0]
+                preds.append(p)
+                last = np.append(last[:,1:,:], [[[p]]], axis=1)
+            pred_vals = scaler.inverse_transform(np.array(preds).reshape(-1,1)).flatten()
+            pred_df = pd.DataFrame({'Date': pd.date_range(start=data_main.index[-1]+pd.Timedelta(days=1), periods=days), 'Predicted': pred_vals})
+            fig = px.line(pred_df, x='Date', y='Predicted', title="LSTM Forecast")
+            st.plotly_chart(fig, use_container_width=True)
+            st.dataframe(pred_df.style.format({"Predicted": "{:.2f}"}))
+
     else:
-        st.error("No data available for the selected parameters.")
+        st.error("Not enough data.")
+
+# ====================== SENTIMENT (ALPHA VANTAGE ONLY) ======================
+elif tab == "Sentiment":
+    st.subheader("News Sentiment (Alpha Vantage)")
+    df = pd.DataFrame({'News': alpha_posts, 'Link': alpha_links, 'Score': alpha_scores})
+
+    def color(val):
+        return f"color: {'green' if val > 0.1 else 'red' if val < -0.1 else 'gray'}"
+    st.dataframe(df.style.applymap(color, subset=['Score']).format({'Score': '{:.3f}'}), use_container_width=True)
+
+    pos = sum(1 for s in alpha_scores if s > 0.1)
+    neg = sum(1 for s in alpha_scores if s < -0.1)
+    neu = len(alpha_scores) - pos - neg
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Positive", pos)
+    c2.metric("Negative", neg)
+    c3.metric("Neutral", neu)
+
+    st.caption("Real-time sentiment from Alpha Vantage API.")
+
+# ====================== COMPARISON ======================
+elif tab == "Comparison":
+    st.subheader(f"**{selected_ticker} vs {compare_ticker}**")
+
+    base_main = data_main['Adj Close'].iloc[0]
+    base_compare = data_compare['Adj Close'].iloc[0]
+    df_main = (data_main['Adj Close'] / base_main - 1) * 100
+    df_compare = (data_compare['Adj Close'] / base_compare - 1) * 100
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=data_main.index, y=df_main, name=selected_ticker, line=dict(color='#26A69A')))
+    fig.add_trace(go.Scatter(x=data_compare.index, y=df_compare, name=compare_ticker, line=dict(color='#AB47BC')))
+    fig.update_layout(title="Performance (%)", height=600, template="plotly_white")
+    st.plotly_chart(fig, use_container_width=True)
+
+    ret_main = (data_main['Adj Close'].iloc[-1] / base_main - 1) * 100
+    ret_compare = (data_compare['Adj Close'].iloc[-1] / base_compare - 1) * 100
+    vol_main = data_main['Adj Close'].pct_change().std() * np.sqrt(252) * 100
+    vol_compare = data_compare['Adj Close'].pct_change().std() * np.sqrt(252) * 100
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric(f"{selected_ticker} Return", f"{ret_main:+.2f}%")
+    c2.metric(f"{compare_ticker} Return", f"{ret_compare:+.2f}%")
+    c3.metric(f"{selected_ticker} Vol", f"{vol_main:.1f}%")
+    c4.metric(f"{compare_ticker} Vol", f"{vol_compare:.1f}%")
+
+# ====================== VERTICAL NEWS TICKER (YAHOO) ======================
+st.markdown("---")
+st.markdown("### Latest Market Headlines (Yahoo Finance)")
+
+st.markdown("""
+<style>
+.news-container {
+    height: 260px;
+    overflow: hidden;
+    background: #0f172a;
+    padding: 16px;
+    border-radius: 14px;
+    box-shadow: 0 6px 24px rgba(0,0,0,0.3);
+    color: white;
+    font-family: 'Segoe UI', sans-serif;
+}
+.news-scroll {
+    animation: scroll-up 35s linear infinite;
+}
+@keyframes scroll-up {
+    0% { transform: translateY(0); }
+    100% { transform: translateY(-100%); }
+}
+.news-item {
+    padding: 11px 0;
+    border-bottom: 1px solid #334155;
+    font-size: 15px;
+    line-height: 1.6;
+}
+.news-item:last-child {
+    border-bottom: none;
+}
+</style>
+""", unsafe_allow_html=True)
+
+all_headlines = news_headlines + news_headlines
+
+with st.container():
+    st.markdown('<div class="news-container">', unsafe_allow_html=True)
+    st.markdown('<div class="news-scroll">', unsafe_allow_html=True)
+    for h in all_headlines:
+        st.markdown(f'<div class="news-item">{h}</div>', unsafe_allow_html=True)
+    st.markdown('</div></div>', unsafe_allow_html=True)
+
+st.caption("News from Yahoo Finance • Updates every 5 minutes")
