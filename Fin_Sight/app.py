@@ -15,17 +15,17 @@ from tensorflow.keras.layers import LSTM, Dense
 from sklearn.preprocessing import MinMaxScaler
 from streamlit_option_menu import option_menu
 
-# ====================== INITIAL SETUP ======================
+# ====================== SETUP ======================
 nltk.download('vader_lexicon', quiet=True)
 current_date = datetime.now().date()
 
 st.set_page_config(page_title="FinSight", layout="wide")
-st.title("**FinSight**: Advanced Stock Analysis Dashboard")
+st.title("**FinSight**: Real-Time Stock Intelligence")
 
-# ====================== SIDEBAR (FIRST) ======================
-st.sidebar.header("User Input")
+# ====================== SIDEBAR ======================
+st.sidebar.header("Controls")
 tickers = ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'TSLA', 'NVDA', 'META', 'NFLX', 'AMD', 'JPM', 'V', 'XOM']
-selected_ticker = st.sidebar.selectbox("Select Stock Ticker", tickers)
+selected_ticker = st.sidebar.selectbox("Stock Ticker", tickers)
 start_date = st.sidebar.date_input("Start Date", pd.to_datetime('2018-01-01').date())
 end_date = st.sidebar.date_input("End Date", current_date)
 
@@ -34,128 +34,72 @@ if start_date > end_date:
     st.stop()
 if end_date > current_date:
     end_date = current_date
-    st.warning(f"End date capped at today: {current_date}")
+    st.warning(f"End date set to today: {current_date}")
 
-# ====================== SAFE TICKER OBJECT ======================
+# ====================== TICKER & NEWS ======================
 @st.cache_resource(ttl=300)
 def get_ticker(ticker):
     return yf.Ticker(ticker)
 
 ticker_obj = get_ticker(selected_ticker)
 
-# ====================== NEWS TICKER (SAFE) ======================
-st.markdown("""
-<style>
-.news-ticker {
-    background: linear-gradient(90deg, #1e40af, #3b82f6);
-    color: white;
-    padding: 14px;
-    border-radius: 12px;
-    overflow: hidden;
-    white-space: nowrap;
-    margin: 15px 0;
-    box-shadow: 0 4px 15px rgba(0,0,0,0.15);
-    font-size: 15px;
-    font-weight: 500;
-}
-.news-ticker:hover .ticker-content { animation-play-state: paused; }
-@keyframes scroll {
-    0% { transform: translateX(100%); }
-    100% { transform: translateX(-100%); }
-}
-.ticker-content {
-    display: inline-block;
-    animation: scroll 50s linear infinite;
-    padding-left: 100%;
-}
-</style>
-""", unsafe_allow_html=True)
+# Fetch news safely
+def get_news():
+    try:
+        news = ticker_obj.news
+        if not news or len(news) == 0:
+            return ["No news available at this time."]
+        headlines = []
+        for item in news[:15]:  # Top 15
+            title = item.get('title', '').strip()
+            pub = item.get('publisher', 'Source').strip()
+            if title:
+                headlines.append(f"**{title}** – {pub}")
+        return headlines if headlines else ["Market quiet. No major headlines."]
+    except:
+        return ["News feed temporarily down."]
+news_headlines = get_news()
 
-try:
-    news = ticker_obj.news[:10]
-    headlines = []
-    for item in news:
-        title = item.get('title', '').strip()
-        pub = item.get('publisher', 'Source').strip()
-        if title:
-            headlines.append(f"{title} ({pub})")
-    text = "  •  ".join(headlines) if headlines else "No recent news."
-    st.markdown(f'<div class="news-ticker"><span class="ticker-content">{text}</span></div>', unsafe_allow_html=True)
-except:
-    st.markdown('<div class="news-ticker"><span class="ticker-content">News feed unavailable.</span></div>', unsafe_allow_html=True)
-
-# ====================== BULLETPROOF DATA FETCH ======================
+# ====================== DATA FETCH (BULLETPROOF) ======================
 @st.cache_data(ttl=600)
 def fetch_stock_data(ticker, start, end):
     try:
-        df = yf.download(ticker, start=start, end=end, progress=False, auto_adjust=False)
+        df = yf.download(ticker, start=start, end=end, progress=False)
         if df.empty:
-            st.error(f"No data for {ticker}. Try a different ticker.")
+            st.error("No data found.")
             return None
-
-        # --- STEP 1: Flatten MultiIndex ---
         if isinstance(df.columns, pd.MultiIndex):
-            # Case: ('Close', 'AAPL')
-            df.columns = df.columns.droplevel(1)  # Remove ticker level
-
-        # --- STEP 2: Ensure required columns ---
+            df.columns = df.columns.droplevel(1)
         required = ['Open', 'High', 'Low', 'Close', 'Adj Close']
-        missing = [col for col in required if col not in df.columns]
-        if missing:
-            st.error(f"Missing columns: {missing}. Using available data.")
-            if 'Adj Close' not in df.columns:
-                if 'Close' in df.columns:
-                    df['Adj Close'] = df['Close']
-                else:
-                    st.error("No price data available.")
-                    return None
-
-        # --- STEP 3: Select & Clean ---
+        if 'Adj Close' not in df.columns and 'Close' in df.columns:
+            df['Adj Close'] = df['Close']
         df = df[required].dropna(how='all')
         if len(df) < 30:
-            st.warning("Need 30+ days of data.")
+            st.warning("Need 30+ days.")
             return None
-
-        df.index.name = 'Date'
         return df
-
     except Exception as e:
-        st.error(f"Data error: {str(e)}")
+        st.error(f"Error: {e}")
         return None
 
 data = fetch_stock_data(selected_ticker, start_date, end_date)
 if data is None:
     st.stop()
 
-# Use same data for OHLC
 full_data = data.copy()
 
-# ====================== SENTIMENT (SAFE) ======================
+# ====================== SENTIMENT ======================
 @st.cache_data(ttl=300)
-def get_sentiment_news(ticker):
+def get_sentiment_news():
     try:
-        api_key = "D8VCWYUPOFJR8D52"
-        if api_key != "your_alphavantage_key_here":
-            url = f"https://www.alphavantage.co/query?function=NEWS_SENTIMENT&tickers={ticker}&apikey={api_key}"
-            r = requests.get(url, timeout=10)
-            if r.status_code == 200:
-                j = r.json()
-                feed = j.get('feed', [])
-                if feed:
-                    return [
-                        f"{a.get('title','')}: {a.get('summary','')[:120]}..."
-                        for a in feed[:10]
-                    ], [a.get('url','#') for a in feed[:10]]
-        # yfinance fallback
         news = ticker_obj.news[:10]
-        return [
-            f"{n.get('title','No title')} - {n.get('publisher','Source')}"
-            for n in news
-        ], [n.get('link','#') for n in news]
+        posts = [f"{n.get('title','News')} – {n.get('publisher','Source')}" for n in news]
+        links = [n.get('link','#') for n in news]
+        return posts, links
     except:
         return ["News unavailable."], ['#']
 
-sample_posts, links = get_sentiment_news(selected_ticker)
+sample_posts, links = get_sentiment_news()
 
 # ====================== TABS ======================
 tab = option_menu(
@@ -165,57 +109,45 @@ tab = option_menu(
     orientation="horizontal"
 )
 
-# ====================== DATA & VIZ ======================
+# ====================== MAIN CONTENT ======================
 if tab == "Data & Viz":
-    st.header(f"**{selected_ticker}** - Price History")
+    st.subheader(f"**{selected_ticker}** – Price History")
     st.dataframe(data.tail(100), use_container_width=True)
-    st.download_button("Download CSV", data.to_csv().encode(), f"{selected_ticker}.csv", "text/csv")
+    st.download_button("Download CSV", data.to_csv().encode(), f"{selected_ticker}.csv")
 
-    st.subheader("Price Trend")
-    fig = px.line(data, x=data.index, y='Adj Close', title="Adjusted Close Price")
-    fig.update_layout(height=500, template="plotly_white")
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(px.line(data, x=data.index, y='Adj Close', title="Price Trend"), use_container_width=True)
 
-    st.subheader("Key Metrics")
-    c1, c2, c3, c4 = st.columns(4)
+    c1, c2, c3 = st.columns(3)
     try:
         close = data['Close'].iloc[-1]
-        change_7d = (close - data['Close'].iloc[-8]) / data['Close'].iloc[-8] * 100 if len(data) > 7 else 0
+        change = (close - data['Close'].iloc[-8]) / data['Close'].iloc[-8] * 100 if len(data) > 7 else 0
         vol = data['Close'].pct_change().std() * np.sqrt(252) * 100
         c1.metric("Price", f"${close:,.2f}")
-        c2.metric("7D Δ", f"{change_7d:+.2f}%")
+        c2.metric("7D Change", f"{change:+.2f}%")
         c3.metric("Volatility", f"{vol:.1f}%")
-        c4.metric("Volume", f"{data['Volume'].iloc[-1]:,}")
     except:
         c1.metric("Price", "N/A")
 
-    st.subheader("Candlestick Chart")
-    fig_c = go.Figure(data=[go.Candlestick(
-        x=data.index,
-        open=data['Open'], high=data['High'],
-        low=data['Low'], close=data['Close']
-    )])
-    fig_c.update_layout(title=f"{selected_ticker} OHLC", height=600, template="plotly_white")
-    st.plotly_chart(fig_c, use_container_width=True)
+    fig_c = go.Figure(go.Candlestick(x=data.index, open=data['Open'], high=data['High'], low=data['Low'], close=data['Close']))
+    st.plotly_chart(fig_c.update_layout(title="Candlestick", height=600), use_container_width=True)
 
-# ====================== PREDICTIONS ======================
 elif tab == "Predictions":
-    st.header("Future Price Forecast")
+    st.subheader("Price Forecast")
     model = st.selectbox("Model", ["Prophet", "LSTM"])
-    days = st.slider("Days Ahead", 1, 30, 7)
+    days = st.slider("Days", 1, 30, 7)
 
     if model == "Prophet" and len(data) >= 30:
-        with st.spinner("Training Prophet..."):
+        with st.spinner("Running Prophet..."):
             df_p = data.reset_index()[['Date', 'Adj Close']].rename(columns={'Date': 'ds', 'Adj Close': 'y'})
-            m = Prophet(daily_seasonality=True, yearly_seasonality=True)
+            m = Prophet()
             m.fit(df_p)
             future = m.make_future_dataframe(periods=days)
             forecast = m.predict(future)
-            pred = forecast[['ds', 'yhat', 'yhat_lower', 'yhat_upper']].tail(days)
-            pred.columns = ['Date', 'Predicted', 'Lower', 'Upper']
+            pred = forecast[['ds', 'yhat']].tail(days)
+            pred.columns = ['Date', 'Predicted']
             fig = plot_plotly(m, forecast)
             st.plotly_chart(fig, use_container_width=True)
-            st.dataframe(pred.style.format({"Predicted": "{:.2f}", "Lower": "{:.2f}", "Upper": "{:.2f}"}))
+            st.dataframe(pred.style.format({"Predicted": "{:.2f}"}))
 
     elif model == "LSTM" and len(data) >= 60:
         with st.spinner("Training LSTM..."):
@@ -227,8 +159,7 @@ elif tab == "Predictions":
                 y.append(scaled[i, 0])
             X, y = np.array(X), np.array(y)
             X = X.reshape((X.shape[0], 60, 1))
-            lstm = Sequential([LSTM(50, return_sequences=True, input_shape=(60,1)),
-                               LSTM(50), Dense(1)])
+            lstm = Sequential([LSTM(50, return_sequences=True, input_shape=(60,1)), LSTM(50), Dense(1)])
             lstm.compile('adam', 'mse')
             lstm.fit(X, y, epochs=3, batch_size=32, verbose=0)
             last = scaled[-60:].reshape(1,60,1)
@@ -238,18 +169,15 @@ elif tab == "Predictions":
                 preds.append(p)
                 last = np.append(last[:,1:,:], [[[p]]], axis=1)
             pred_vals = scaler.inverse_transform(np.array(preds).reshape(-1,1)).flatten()
-            pred_df = pd.DataFrame({'Date': pd.date_range(start=data.index[-1]+pd.Timedelta(days=1), periods=days),
-                                    'Predicted': pred_vals})
-            fig = px.line(pred_df, x='Date', y='Predicted', title="LSTM Forecast")
-            st.plotly_chart(fig, use_container_width=True)
+            pred_df = pd.DataFrame({'Date': pd.date_range(start=data.index[-1]+pd.Timedelta(days=1), periods=days), 'Predicted': pred_vals})
+            st.plotly_chart(px.line(pred_df, x='Date', y='Predicted', title="LSTM Forecast"), use_container_width=True)
             st.dataframe(pred_df.style.format({"Predicted": "{:.2f}"}))
 
     else:
-        st.error("Not enough data for selected model.")
+        st.error("Not enough data.")
 
-# ====================== SENTIMENT ======================
 elif tab == "Sentiment":
-    st.header("News Sentiment")
+    st.subheader("News Sentiment")
     sia = SentimentIntensityAnalyzer()
     scores = [sia.polarity_scores(p)['compound'] for p in sample_posts]
     df = pd.DataFrame({'News': sample_posts, 'Link': links, 'Score': scores})
@@ -266,4 +194,50 @@ elif tab == "Sentiment":
     c2.metric("Negative", neg)
     c3.metric("Neutral", neu)
 
-    st.caption("Sentiment from latest news. Uses VADER NLP.")
+# ====================== VERTICAL NEWS TICKER (BOTTOM) ======================
+st.markdown("---")
+st.markdown("### Latest Market Headlines")
+
+# CSS for vertical scroll
+st.markdown("""
+<style>
+.news-container {
+    height: 220px;
+    overflow: hidden;
+    background: #0f172a;
+    padding: 12px;
+    border-radius: 12px;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+    color: white;
+    font-family: 'Segoe UI', sans-serif;
+}
+.news-scroll {
+    animation: scroll-up 25s linear infinite;
+}
+@keyframes scroll-up {
+    0% { transform: translateY(0); }
+    100% { transform: translateY(-100%); }
+}
+.news-item {
+    padding: 8px 0;
+    border-bottom: 1px solid #334155;
+    font-size: 14px;
+    line-height: 1.5;
+}
+.news-item:last-child {
+    border-bottom: none;
+}
+</style>
+""", unsafe_allow_html=True)
+
+# Duplicate headlines for seamless loop
+all_headlines = news_headlines + news_headlines
+
+with st.container():
+    st.markdown('<div class="news-container">', unsafe_allow_html=True)
+    st.markdown('<div class="news-scroll">', unsafe_allow_html=True)
+    for h in all_headlines:
+        st.markdown(f'<div class="news-item">{h}</div>', unsafe_allow_html=True)
+    st.markdown('</div></div>', unsafe_allow_html=True)
+
+st.caption("News sourced from Yahoo Finance • Updates every 5 minutes")
