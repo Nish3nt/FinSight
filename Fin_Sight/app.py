@@ -15,7 +15,7 @@ from tensorflow.keras.layers import LSTM, Dense
 from sklearn.preprocessing import MinMaxScaler
 from streamlit_option_menu import option_menu
 
-# ====================== INITIAL SETUP ======================
+# ====================== SETUP ======================
 nltk.download('vader_lexicon', quiet=True)
 current_date = datetime.now().date()
 
@@ -37,33 +37,38 @@ if end_date > current_date:
     end_date = current_date
     st.warning(f"End date capped at today: {current_date}")
 
-# ====================== FETCH TICKER OBJECT ======================
+# ====================== ALPHA VANTAGE KEY (YOU MUST SET THIS) ======================
+# GO TO: https://www.alphavantage.co/support/#api-key
+# GET FREE KEY → PASTE BELOW
+ALPHA_VANTAGE_KEY = "D8VCWYUPOFJR8D52"  # ←←← REPLACE THIS!!!
+
+# ====================== FETCH TICKER ======================
 @st.cache_resource(ttl=300)
 def get_ticker(ticker):
     return yf.Ticker(ticker)
 
 ticker_obj = get_ticker(selected_ticker)
 
-# ====================== FETCH YAHOO NEWS (FOR TICKER) ======================
+# ====================== YAHOO NEWS (FOR TICKER) ======================
 @st.cache_data(ttl=300)
 def get_yahoo_headlines(ticker):
     try:
         news = ticker_obj.news
-        if not news or len(news) == 0:
-            return ["No recent headlines."]
+        if not news:
+            return ["No headlines available."]
         headlines = []
         for item in news[:15]:
             title = item.get('title', '').strip()
             pub = item.get('publisher', 'Source').strip()
             if title:
                 headlines.append(f"**{title}** – {pub}")
-        return headlines if headlines else ["Market quiet."]
+        return headlines or ["Market quiet."]
     except:
-        return ["News feed temporarily unavailable."]
+        return ["News temporarily unavailable."]
 
-news_headlines = get_yahoo_headlines(selected_ticker)  # NOW DEFINED
+news_headlines = get_yahoo_headlines(selected_ticker)
 
-# ====================== FETCH STOCK DATA ======================
+# ====================== STOCK DATA ======================
 @st.cache_data(ttl=600)
 def fetch_stock_data(ticker, start, end):
     try:
@@ -78,11 +83,11 @@ def fetch_stock_data(ticker, start, end):
             df['Adj Close'] = df['Close']
         df = df[required].dropna(how='all')
         if len(df) < 30:
-            st.warning("Need 30+ days of data.")
+            st.warning("Need 30+ days.")
             return None
         return df
     except Exception as e:
-        st.error(f"Data fetch error: {e}")
+        st.error(f"Data error: {e}")
         return None
 
 data_main = fetch_stock_data(selected_ticker, start_date, end_date)
@@ -91,29 +96,45 @@ data_compare = fetch_stock_data(compare_ticker, start_date, end_date)
 if data_main is None or data_compare is None:
     st.stop()
 
-# ====================== ALPHA VANTAGE SENTIMENT (ONLY) ======================
+# ====================== ALPHA VANTAGE SENTIMENT (REAL, NO FALLBACK) ======================
 @st.cache_data(ttl=300)
 def get_alpha_sentiment(ticker):
+    if not ALPHA_VANTAGE_KEY or ALPHA_VANTAGE_KEY == "D8VCWYUPOFJR8D52":
+        st.error("Please set your Alpha Vantage API key in the code!")
+        st.stop()
+
     try:
-        api_key = "D8VCWYUPOFJR8D52"  # REPLACE THIS
-        if not api_key or api_key == "YOUR_ALPHA_VANTAGE_KEY":
-            st.warning("Alpha Vantage key missing. Using fallback.")
-            raise ValueError("No key")
-        url = f"https://www.alphavantage.co/query?function=NEWS_SENTIMENT&tickers={ticker}&limit=10&apikey={api_key}"
-        r = requests.get(url, timeout=10)
+        url = f"https://www.alphavantage.co/query"
+        params = {
+            'function': 'NEWS_SENTIMENT',
+            'tickers': ticker,
+            'limit': 10,
+            'apikey': ALPHA_VANTAGE_KEY
+        }
+        with st.spinner("Fetching real-time sentiment..."):
+            r = requests.get(url, params=params, timeout=15)
+        
         if r.status_code != 200:
-            raise ValueError(f"API error: {r.status_code}")
+            st.error(f"API Error {r.status_code}. Check key or internet.")
+            st.stop()
+
         j = r.json()
+        
+        # Debug (remove later)
+        # st.json(j)
+
         feed = j.get('feed', [])
         if not feed:
-            raise ValueError("No news in feed")
+            st.warning("No news from Alpha Vantage. Using cached data.")
+            return ["No recent news."], ['#'], [0.0]
+
         posts, links, scores = [], [], []
         for art in feed:
             title = art.get('title', 'News')
             summary = art.get('summary', '')[:120]
             posts.append(f"{title}: {summary}...")
             links.append(art.get('url', '#'))
-            # Extract score
+
             score = 0.0
             for ts in art.get('ticker_sentiment', []):
                 if ts.get('ticker') == ticker:
@@ -122,14 +143,15 @@ def get_alpha_sentiment(ticker):
                     except:
                         score = 0.0
             scores.append(score)
-        return posts, links, scores
-    except Exception as e:
-        st.info("Alpha Vantage failed. Using yfinance news.")
-        news = ticker_obj.news[:10]
-        posts = [f"{n.get('title','News')} – {n.get('publisher','Source')}" for n in news]
-        links = [n.get('link','#') for n in news]
-        return posts, links, [0.0] * len(posts)
 
+        return posts, links, scores
+
+    except Exception as e:
+        st.error(f"Alpha Vantage failed: {str(e)}")
+        st.info("Check your key or rate limits.")
+        st.stop()
+
+# FETCH REAL SENTIMENT
 alpha_posts, alpha_links, alpha_scores = get_alpha_sentiment(selected_ticker)
 
 # ====================== TABS ======================
@@ -210,9 +232,9 @@ elif tab == "Predictions":
     else:
         st.error("Not enough data.")
 
-# ====================== SENTIMENT (ALPHA VANTAGE ONLY) ======================
+# ====================== SENTIMENT (ALPHA VANTAGE) ======================
 elif tab == "Sentiment":
-    st.subheader("News Sentiment (Alpha Vantage)")
+    st.subheader("Real-Time News Sentiment (Alpha Vantage)")
     df = pd.DataFrame({'News': alpha_posts, 'Link': alpha_links, 'Score': alpha_scores})
 
     def color(val):
@@ -227,7 +249,7 @@ elif tab == "Sentiment":
     c2.metric("Negative", neg)
     c3.metric("Neutral", neu)
 
-    st.caption("Real-time sentiment from Alpha Vantage API.")
+    st.success("Real sentiment scores from Alpha Vantage API.")
 
 # ====================== COMPARISON ======================
 elif tab == "Comparison":
@@ -283,9 +305,6 @@ st.markdown("""
     border-bottom: 1px solid #334155;
     font-size: 15px;
     line-height: 1.6;
-}
-.news-item:last-child {
-    border-bottom: none;
 }
 </style>
 """, unsafe_allow_html=True)
