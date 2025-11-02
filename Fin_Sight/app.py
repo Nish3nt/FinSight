@@ -264,10 +264,13 @@ elif tab == "Comparison":
 st.markdown("---")
 st.markdown("### Latest Headlines (24/7)")
 
-# Duplicate headlines for seamless infinite scroll
-scroll_items = news_headlines * 3  # 3x for smooth loop
+# Duplicate headlines for seamless infinite scroll (original + copy)
+all_headlines = news_headlines + news_headlines
 
-# CSS + HTML for auto-scrolling
+# Calculate animation duration based on number of headlines (2 seconds per headline, min 10s)
+animation_duration = max(10, len(news_headlines) * 2)
+
+# CSS for robust, seamless vertical scrolling ticker
 st.markdown(f"""
 <style>
 .ticker-container {{
@@ -279,19 +282,23 @@ st.markdown(f"""
     box-shadow: 0 6px 24px rgba(0,0,0,0.3);
     color: white;
     font-family: 'Segoe UI', sans-serif;
+    position: relative;
 }}
 .ticker-wrapper {{
-    animation: scroll-ticker {len(scroll_items) * 3}s linear infinite;
+    animation: scroll-up {animation_duration}s linear infinite;
+    will-change: transform;
 }}
-@keyframes scroll-ticker {{
+@keyframes scroll-up {{
     0% {{ transform: translateY(0); }}
-    100% {{ transform: translateY(-{len(scroll_items) * 40}px); }}
+    100% {{ transform: translateY(-50%); }}
 }}
 .ticker-item {{
-    padding: 10px 0;
+    padding: 12px 0;
     border-bottom: 1px solid #334155;
     font-size: 15px;
     line-height: 1.6;
+    min-height: 40px;  /* Ensures minimum spacing */
+    overflow: hidden;  /* Prevents long titles from breaking layout */
 }}
 .ticker-item:last-child {{
     border-bottom: none;
@@ -302,8 +309,8 @@ st.markdown(f"""
 with st.container():
     st.markdown('<div class="ticker-container">', unsafe_allow_html=True)
     st.markdown('<div class="ticker-wrapper">', unsafe_allow_html=True)
-    for item in scroll_items:
-        st.markdown(f'<div class="ticker-item">{item}</div>', unsafe_allow_html=True)
+    for h in all_headlines:
+        st.markdown(f'<div class="ticker-item">{h}</div>', unsafe_allow_html=True)
     st.markdown('</div></div>', unsafe_allow_html=True)
 
-st.caption("Live news • Auto-scrolling • Updates every 5 minutes")
+st.caption("Live news from NewsAPI or Yahoo Finance • Auto-scrolling 24/7 like CNBC • Updates every 5 minutes")
