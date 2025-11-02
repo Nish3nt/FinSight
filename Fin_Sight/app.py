@@ -218,7 +218,7 @@ elif tab == "Predictions":
 
 # ====================== SENTIMENT ======================
 elif tab == "Sentiment":
-    st.subheader("News Sentiment (VADER)")
+    st.subheader("News Sentiment")
     df = pd.DataFrame({'News': news_posts, 'Link': news_links, 'Score': vader_scores})
 
     def color(val):
@@ -274,7 +274,7 @@ animation_duration = max(15, len(news_headlines) * 3)
 st.markdown(f"""
 <style>
 .ticker-container {{
-    height: 280px;
+    height: 180px;
     overflow: hidden;
     background: #0f172a;
     padding: 16px;
@@ -294,7 +294,6 @@ st.markdown(f"""
 }}
 .ticker-item {{
     padding: 12px 0;
-    border-bottom: 1px solid #334155;
     font-size: 15px;
     line-height: 1.6;
     min-height: 40px;  /* Consistent spacing */
@@ -302,9 +301,6 @@ st.markdown(f"""
     text-overflow: ellipsis;
     white-space: normal;  /* Allow wrapping for long titles */
     word-wrap: break-word;
-}}
-.ticker-item:last-child {{
-    border-bottom: none;
 }}
 </style>
 """, unsafe_allow_html=True)
@@ -317,5 +313,3 @@ html_content += '</div></div>'
 
 # Render the full HTML in one go
 st.markdown(html_content, unsafe_allow_html=True)
-
-st.caption("Live news from NewsAPI or Yahoo Finance • Auto-scrolling 24/7 like CNBC • Updates every 5 minutes")
