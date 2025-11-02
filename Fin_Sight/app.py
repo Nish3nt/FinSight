@@ -17,6 +17,7 @@ from streamlit_option_menu import option_menu
 
 # ====================== INITIAL SETUP ======================
 nltk.download('vader_lexicon', quiet=True)
+sia = SentimentIntensityAnalyzer()  # Initialize VADER once
 current_date = datetime.now().date()
 
 st.set_page_config(page_title="FinSight", layout="wide")
@@ -44,24 +45,75 @@ def get_ticker(ticker):
 
 ticker_obj = get_ticker(selected_ticker)
 
-# ====================== FETCH YAHOO NEWS (FOR TICKER) ======================
+# ====================== FETCH NEWS (NewsAPI + Yahoo Fallback) ======================
 @st.cache_data(ttl=300)
-def get_yahoo_headlines(ticker):
+def get_news(ticker):
+    # --- OPTION 1: Try NewsAPI (Recommended - 24/7, broad coverage) ---
+    try:
+        api_key = st.secrets.get("NEWSAPI_KEY") or "d848a496d874401b9e2129a71adb57ba"  # Use Streamlit secrets or replace
+        if api_key and api_key != "YOUR_NEWSAPI_KEY":
+            url = f"https://newsapi.org/v2/everything"
+            params = {
+                'q': f'{ticker} stock OR {ticker} earnings OR {ticker} news',
+                'sortBy': 'publishedAt',
+                'pageSize': 15,
+                'language': 'en',
+                'apiKey': api_key
+            }
+            r = requests.get(url, params=params, timeout=10)
+            if r.status_code == 200:
+                j = r.json()
+                articles = j.get('articles', [])
+                if articles:
+                    headlines = []
+                    posts = []
+                    links = []
+                    for art in articles:
+                        title = art.get('title', '').strip()
+                        source = art.get('source', {}).get('name', 'Source').strip()
+                        url = art.get('url', '#')
+                        if title:
+                            hl = f"**{title}** – {source}"
+                            headlines.append(hl)
+                            posts.append(f"{title} – {source}")
+                            links.append(url)
+                    return headlines, posts, links
+    except Exception as e:
+        st.warning(f"NewsAPI failed: {str(e)}. Using Yahoo Finance fallback.")
+
+    # --- OPTION 2: Fallback to Yahoo Finance ---
     try:
         news = ticker_obj.news
         if not news or len(news) == 0:
-            return ["No recent headlines."]
+            return ["No recent headlines."], ["No recent headlines."], ["#"]
         headlines = []
+        posts = []
+        links = []
         for item in news[:15]:
             title = item.get('title', '').strip()
             pub = item.get('publisher', 'Source').strip()
+            url = item.get('link', '#')
             if title:
-                headlines.append(f"**{title}** – {pub}")
-        return headlines if headlines else ["Market quiet."]
+                hl = f"**{title}** – {pub}"
+                headlines.append(hl)
+                posts.append(f"{title} – {pub}")
+                links.append(url)
+        return headlines if headlines else ["Market quiet."], posts, links
     except:
-        return ["News feed temporarily unavailable."]
+        return ["News feed temporarily unavailable."], ["News feed temporarily unavailable."], ["#"]
 
-news_headlines = get_yahoo_headlines(selected_ticker)  # NOW DEFINED
+news_headlines, news_posts, news_links = get_news(selected_ticker)
+
+# ====================== COMPUTE VADER SENTIMENT ======================
+@st.cache_data(ttl=300)
+def compute_vader_sentiment(posts):
+    scores = []
+    for post in posts:
+        score = sia.polarity_scores(post)['compound']
+        scores.append(score)
+    return scores
+
+vader_scores = compute_vader_sentiment(news_posts)
 
 # ====================== FETCH STOCK DATA ======================
 @st.cache_data(ttl=600)
@@ -90,47 +142,6 @@ data_compare = fetch_stock_data(compare_ticker, start_date, end_date)
 
 if data_main is None or data_compare is None:
     st.stop()
-
-# ====================== ALPHA VANTAGE SENTIMENT (ONLY) ======================
-@st.cache_data(ttl=300)
-def get_alpha_sentiment(ticker):
-    try:
-        api_key = "D8VCWYUPOFJR8D52"  # REPLACE THIS
-        if not api_key or api_key == "YOUR_ALPHA_VANTAGE_KEY":
-            st.warning("Alpha Vantage key missing. Using fallback.")
-            raise ValueError("No key")
-        url = f"https://www.alphavantage.co/query?function=NEWS_SENTIMENT&tickers={ticker}&limit=10&apikey={api_key}"
-        r = requests.get(url, timeout=10)
-        if r.status_code != 200:
-            raise ValueError(f"API error: {r.status_code}")
-        j = r.json()
-        feed = j.get('feed', [])
-        if not feed:
-            raise ValueError("No news in feed")
-        posts, links, scores = [], [], []
-        for art in feed:
-            title = art.get('title', 'News')
-            summary = art.get('summary', '')[:120]
-            posts.append(f"{title}: {summary}...")
-            links.append(art.get('url', '#'))
-            # Extract score
-            score = 0.0
-            for ts in art.get('ticker_sentiment', []):
-                if ts.get('ticker') == ticker:
-                    try:
-                        score = float(ts.get('ticker_sentiment_score', 0))
-                    except:
-                        score = 0.0
-            scores.append(score)
-        return posts, links, scores
-    except Exception as e:
-        st.info("Alpha Vantage failed. Using yfinance news.")
-        news = ticker_obj.news[:10]
-        posts = [f"{n.get('title','News')} – {n.get('publisher','Source')}" for n in news]
-        links = [n.get('link','#') for n in news]
-        return posts, links, [0.0] * len(posts)
-
-alpha_posts, alpha_links, alpha_scores = get_alpha_sentiment(selected_ticker)
 
 # ====================== TABS ======================
 tab = option_menu(
@@ -210,24 +221,24 @@ elif tab == "Predictions":
     else:
         st.error("Not enough data.")
 
-# ====================== SENTIMENT (ALPHA VANTAGE ONLY) ======================
+# ====================== SENTIMENT (VADER) ======================
 elif tab == "Sentiment":
-    st.subheader("News Sentiment (Alpha Vantage)")
-    df = pd.DataFrame({'News': alpha_posts, 'Link': alpha_links, 'Score': alpha_scores})
+    st.subheader("News Sentiment Analysis (VADER)")
+    df = pd.DataFrame({'News': news_posts, 'Link': news_links, 'Score': vader_scores})
 
     def color(val):
         return f"color: {'green' if val > 0.1 else 'red' if val < -0.1 else 'gray'}"
     st.dataframe(df.style.applymap(color, subset=['Score']).format({'Score': '{:.3f}'}), use_container_width=True)
 
-    pos = sum(1 for s in alpha_scores if s > 0.1)
-    neg = sum(1 for s in alpha_scores if s < -0.1)
-    neu = len(alpha_scores) - pos - neg
+    pos = sum(1 for s in vader_scores if s > 0.1)
+    neg = sum(1 for s in vader_scores if s < -0.1)
+    neu = len(vader_scores) - pos - neg
     c1, c2, c3 = st.columns(3)
     c1.metric("Positive", pos)
     c2.metric("Negative", neg)
     c3.metric("Neutral", neu)
 
-    st.caption("Real-time sentiment from Alpha Vantage API.")
+    st.caption("Sentiment computed using VADER on real-time news. Works 24/7 for any ticker.")
 
 # ====================== COMPARISON ======================
 elif tab == "Comparison":
@@ -255,9 +266,9 @@ elif tab == "Comparison":
     c3.metric(f"{selected_ticker} Vol", f"{vol_main:.1f}%")
     c4.metric(f"{compare_ticker} Vol", f"{vol_compare:.1f}%")
 
-# ====================== VERTICAL NEWS TICKER (YAHOO) ======================
+# ====================== VERTICAL NEWS TICKER ======================
 st.markdown("---")
-st.markdown("### Latest Market Headlines (Yahoo Finance)")
+st.markdown("### Latest Headlines (24/7)")
 
 st.markdown("""
 <style>
@@ -299,4 +310,4 @@ with st.container():
         st.markdown(f'<div class="news-item">{h}</div>', unsafe_allow_html=True)
     st.markdown('</div></div>', unsafe_allow_html=True)
 
-st.caption("News from Yahoo Finance • Updates every 5 minutes")
+st.caption("Live news from NewsAPI (24/7) or Yahoo Finance • Updates every 5 minutes")
