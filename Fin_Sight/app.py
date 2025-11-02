@@ -26,10 +26,10 @@ st.title("**FinSight**: Real-Time Stock Intelligence")
 # ====================== SIDEBAR ======================
 st.sidebar.header("Controls")
 tickers = ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'TSLA', 'NVDA', 'META', 'NFLX', 'AMD', 'JPM', 'V', 'XOM']
-selected_ticker = st.sidebar.selectbox("Main Stock", tickers)
-compare_ticker = st.sidebar.selectbox("Compare With", tickers, index=1)
-start_date = st.sidebar.date_input("Start Date", pd.to_datetime('2018-01-01').date())
-end_date = st.sidebar.date_input("End Date", current_date)
+selected_ticker = st.sidebar.selectbox("Main Stock", tickers, key="main_ticker")
+compare_ticker = st.sidebar.selectbox("Compare With", tickers, index=1, key="compare_ticker")
+start_date = st.sidebar.date_input("Start Date", pd.to_datetime('2018-01-01').date(), key="start_date")
+end_date = st.sidebar.date_input("End Date", current_date, key="end_date")
 
 if start_date > end_date:
     st.error("Start date must be before end date.")
@@ -169,14 +169,15 @@ tab = option_menu(
     menu_title=None,
     options=["Data & Viz", "Predictions", "Sentiment", "Simulator", "Comparison"],
     icons=["table", "graph-up", "chat-dots", "robot", "arrow-left-right"],
-    orientation="horizontal"
+    orientation="horizontal",
+    key="main_menu"
 )
 
 # ====================== DATA & VIZ ======================
 if tab == "Data & Viz":
     st.subheader(f"**{selected_ticker}** – Price History")
     st.dataframe(data_main.tail(100), use_container_width=True)
-    st.download_button("Download CSV", data_main.to_csv().encode(), f"{selected_ticker}.csv")
+    st.download_button("Download CSV", data_main.to_csv().encode(), f"{selected_ticker}.csv", key="download_csv_btn")
 
     fig = px.line(data_main, x=data_main.index, y='Adj Close', title="Price Trend")
     st.plotly_chart(fig, use_container_width=True)
@@ -198,8 +199,8 @@ if tab == "Data & Viz":
 # ====================== PREDICTIONS ======================
 elif tab == "Predictions":
     st.subheader("Price Forecast")
-    model = st.selectbox("Model", ["Prophet", "LSTM"])
-    days = st.slider("Days", 1, 30, 7)
+    model = st.selectbox("Model", ["Prophet", "LSTM"], key="pred_model")
+    days = st.slider("Days", 1, 30, 7, key="pred_days")
 
     if model == "Prophet" and len(data_main) >= 30:
         with st.spinner("Running Prophet..."):
@@ -212,7 +213,7 @@ elif tab == "Predictions":
             pred.columns = ['Date', 'Predicted']
             fig = plot_plotly(m, forecast)
             st.plotly_chart(fig, use_container_width=True)
-            st.dataframe(pred.style.format({"Predicted": "{:.2f}"}))
+            st.dataframe(pred.style.format({"Predicted": "{:.2f}"}), key="prophet_df")
 
     elif model == "LSTM" and len(data_main) >= 60:
         with st.spinner("Training LSTM..."):
@@ -237,7 +238,7 @@ elif tab == "Predictions":
             pred_df = pd.DataFrame({'Date': pd.date_range(start=data_main.index[-1]+pd.Timedelta(days=1), periods=days), 'Predicted': pred_vals})
             fig = px.line(pred_df, x='Date', y='Predicted', title="LSTM Forecast")
             st.plotly_chart(fig, use_container_width=True)
-            st.dataframe(pred_df.style.format({"Predicted": "{:.2f}"}))
+            st.dataframe(pred_df.style.format({"Predicted": "{:.2f}"}), key="lstm_df")
 
     else:
         st.error("Not enough data.")
@@ -249,7 +250,7 @@ elif tab == "Sentiment":
 
     def color(val):
         return f"color: {'green' if val > 0.1 else 'red' if val < -0.1 else 'gray'}"
-    st.dataframe(df.style.applymap(color, subset=['Score']).format({'Score': '{:.3f}'}), use_container_width=True)
+    st.dataframe(df.style.applymap(color, subset=['Score']).format({'Score': '{:.3f}'}), use_container_width=True, key="sentiment_df")
 
     pos = sum(1 for s in vader_scores if s > 0.1)
     neg = sum(1 for s in vader_scores if s < -0.1)
@@ -266,11 +267,11 @@ elif tab == "Simulator":
     st.subheader("News Impact Simulator")
     st.info("Enter hypothetical news about the stock to simulate its price impact. The app analyzes sentiment and adjusts forecasts accordingly.")
     
-    hypo_news = st.text_input("Hypothetical News", placeholder="e.g., AAPL announces revolutionary AI chip")
-    days = st.slider("Forecast Days", 1, 30, 7)
-    model = st.selectbox("Forecast Model", ["Prophet", "LSTM"], index=0)  # Default to Prophet for simplicity
+    hypo_news = st.text_input("Hypothetical News", placeholder="e.g., AAPL announces revolutionary AI chip", key="hypo_news")
+    days = st.slider("Forecast Days", 1, 30, 7, key="sim_days")
+    model = st.selectbox("Forecast Model", ["Prophet", "LSTM"], index=0, key="sim_model")  # Default to Prophet for simplicity
     
-    if st.button("Simulate Impact") and hypo_news:
+    if st.button("Simulate Impact", key="simulate_btn") and hypo_news:
         with st.spinner("Analyzing news and simulating..."):
             hf_token = st.secrets.get("HF_TOKEN") or "YOUR_HF_TOKEN"
             label, score = get_hf_sentiment(hypo_news, hf_token)
@@ -317,7 +318,7 @@ elif tab == "Simulator":
                               annotation_text="News Impact Starts Here")
                 st.plotly_chart(fig, use_container_width=True)
                 
-                st.dataframe(sim_future.style.format({"Simulated": "{:.2f}"}))
+                st.dataframe(sim_future.style.format({"Simulated": "{:.2f}"}), key="sim_prophet_df")
             
             elif model == "LSTM" and len(data_main) >= 60:
                 # Similar adjustment for LSTM
@@ -354,10 +355,10 @@ elif tab == "Simulator":
                               labels={'value': 'Predicted Price'})
                 st.plotly_chart(fig, use_container_width=True)
                 
-                st.dataframe(sim_df.style.format({"Simulated": "{:.2f}"}))
+                st.dataframe(sim_df.style.format({"Simulated": "{:.2f}"}), key="sim_lstm_df")
             else:
                 st.error("Not enough data for simulation.")
-    elif st.button("Simulate Impact"):
+    elif st.button("Simulate Impact", key="simulate_btn"):
         st.warning("Please enter hypothetical news.")
 
 # ====================== COMPARISON ======================
@@ -372,7 +373,7 @@ elif tab == "Comparison":
     fig.add_trace(go.Scatter(x=data_main.index, y=df_main, name=selected_ticker, line=dict(color='#26A69A')))
     fig.add_trace(go.Scatter(x=data_compare.index, y=df_compare, name=compare_ticker, line=dict(color='#AB47BC')))
     fig.update_layout(title="Performance (%)", height=600, template="plotly_white")
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, use_container_width=True, key="comparison_chart")
 
     ret_main = (data_main['Adj Close'].iloc[-1] / base_main - 1) * 100
     ret_compare = (data_compare['Adj Close'].iloc[-1] / base_compare - 1) * 100
