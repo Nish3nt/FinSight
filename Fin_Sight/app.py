@@ -23,93 +23,7 @@ current_date = datetime.now().date()
 st.set_page_config(page_title="FinSight", layout="wide")
 st.title("**FinSight**: Real-Time Stock Intelligence")
 
-# ----------------------------------------------------------------------
-# ====================== LIVE MARKET PULSE HERO ======================
-# ----------------------------------------------------------------------
-@st.cache_data(ttl=60)  # refresh every minute
-def get_market_pulse():
-    # S&P 500 (SPY) & Nasdaq (^IXIC) – latest close
-    spy = yf.Ticker('SPY').history(period='1d')['Close'].iloc[-1]
-    nasdaq = yf.Ticker('^IXIC').history(period='1d')['Close'].iloc[-1]
-
-    # Top gainer / loser from the ticker list (quick scan of first 12)
-    gains = {}
-    for t in tickers[:12]:
-        try:
-            change = yf.Ticker(t).history(period='1d')['Close'].pct_change().iloc[-1]
-            gains[t] = change
-        except:
-            continue
-    top_gainer = max(gains, key=gains.get) if gains else "—"
-    top_loser  = min(gains, key=gains.get) if gains else "—"
-
-    # AI blurb from current VADER sentiment (global, not ticker-specific)
-    overall_sent = np.mean(vader_scores) if vader_scores else 0
-    blurb = ("Market's upbeat—bullish vibes ahead!" 
-             if overall_sent > 0.05 else
-             "Choppy waters; watch for dips." 
-             if overall_sent < -0.05 else
-             "Neutral sentiment – steady as she goes.")
-
-    return spy, nasdaq, top_gainer, top_loser, blurb
-
-# Only compute once per page load (cached)
-spy_price, nasdaq_price, gainer, loser, ai_blurb = get_market_pulse()
-
-# Hero styling (glow + gradient)
-st.markdown("""
-<style>
-@keyframes glow {
-  0%   { box-shadow: 0 0 5px #4CAF50; }
-  50%  { box-shadow: 0 0 20px #4CAF50; }
-  100% { box-shadow: 0 0 5px #4CAF50; }
-}
-.hero-kpi {
-  animation: glow 2s infinite;
-  border-radius: 12px;
-  padding: 12px;
-  background: linear-gradient(45deg, #1e3c72, #2a5298);
-  color: white;
-  text-align: center;
-}
-.hero-blurb {
-  font-size: 1.2em;
-  color: #4CAF50;
-  text-align: center;
-  margin: 20px 0;
-}
-</style>
-""", unsafe_allow_html=True)
-
-# Render hero KPI cards
-col1, col2, col3, col4 = st.columns(4)
-with col1:
-    st.markdown(
-        f'<div class="hero-kpi"><h3>S&P 500</h3><h2>${spy_price:,.2f}</h2></div>',
-        unsafe_allow_html=True,
-    )
-with col2:
-    st.markdown(
-        f'<div class="hero-kpi"><h3>Nasdaq</h3><h2>${nasdaq_price:,.2f}</h2></div>',
-        unsafe_allow_html=True,
-    )
-with col3:
-    st.markdown(
-        f'<div class="hero-kpi"><h3>Top Gainer</h3><h4>{gainer}</h4></div>',
-        unsafe_allow_html=True,
-    )
-with col4:
-    st.markdown(
-        f'<div class="hero-kpi"><h3>Top Loser</h3><h4>{loser}</h4></div>',
-        unsafe_allow_html=True,
-    )
-
-st.markdown(f'<div class="hero-blurb">AI Insight: {ai_blurb}</div>', unsafe_allow_html=True)
-st.divider()   # clean separation before controls
-
-# ----------------------------------------------------------------------
 # ====================== SIDEBAR ======================
-# ----------------------------------------------------------------------
 st.sidebar.header("Controls")
 tickers = ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'TSLA', 'NVDA', 'META', 'NFLX', 'AMD', 'JPM', 'V', 'XOM']
 selected_ticker = st.sidebar.selectbox("Main Stock", tickers)
@@ -150,7 +64,9 @@ def get_news(ticker):
                 j = r.json()
                 articles = j.get('articles', [])
                 if articles:
-                    headlines, posts, links = [], [], []
+                    headlines = []
+                    posts = []
+                    links = []
                     for art in articles:
                         title = art.get('title', '').strip()
                         source = art.get('source', {}).get('name', 'Source').strip()
@@ -164,12 +80,14 @@ def get_news(ticker):
     except:
         st.warning("NewsAPI failed. Using Yahoo Finance.")
 
-    # Yahoo fallback
+    # Fallback: Yahoo Finance
     try:
         news = ticker_obj.news
         if not news or len(news) == 0:
             return ["No recent headlines."], ["No recent headlines."], ["#"]
-        headlines, posts, links = [], [], []
+        headlines = []
+        posts = []
+        links = []
         for item in news[:15]:
             title = item.get('title', '').strip()
             pub = item.get('publisher', 'Source').strip()
@@ -188,7 +106,7 @@ news_headlines, news_posts, news_links = get_news(selected_ticker)
 # ====================== COMPUTE VADER SENTIMENT ======================
 @st.cache_data(ttl=300)
 def compute_vader_sentiment(posts):
-    return [sia.polarity_scores(p)['compound'] for p in posts]
+    return [sia.polarity_scores(post)['compound'] for post in posts]
 
 vader_scores = compute_vader_sentiment(news_posts)
 
@@ -232,18 +150,15 @@ tab = option_menu(
 if tab == "Data & Viz":
     st.subheader(f"**{selected_ticker}** – Price History")
     st.dataframe(data_main.tail(100), use_container_width=True)
-    st.download_button("Download CSV", data_main.to_csv().encode(),
-                       f"{selected_ticker}.csv")
+    st.download_button("Download CSV", data_main.to_csv().encode(), f"{selected_ticker}.csv")
 
-    fig = px.line(data_main, x=data_main.index, y='Adj Close',
-                  title="Price Trend")
+    fig = px.line(data_main, x=data_main.index, y='Adj Close', title="Price Trend")
     st.plotly_chart(fig, use_container_width=True)
 
     c1, c2, c3 = st.columns(3)
     try:
         close = data_main['Close'].iloc[-1]
-        change = (close - data_main['Close'].iloc[-8]) / data_main['Close'].iloc[-8] * 100 \
-                 if len(data_main) > 7 else 0
+        change = (close - data_main['Close'].iloc[-8]) / data_main['Close'].iloc[-8] * 100 if len(data_main) > 7 else 0
         vol = data_main['Close'].pct_change().std() * np.sqrt(252) * 100
         c1.metric("Price", f"${close:,.2f}")
         c2.metric("7D Δ", f"{change:+.2f}%")
@@ -251,15 +166,8 @@ if tab == "Data & Viz":
     except:
         c1.metric("Price", "N/A")
 
-    fig_c = go.Figure(go.Candlestick(
-        x=data_main.index,
-        open=data_main['Open'],
-        high=data_main['High'],
-        low=data_main['Low'],
-        close=data_main['Close']
-    ))
-    st.plotly_chart(fig_c.update_layout(title="Candlestick", height=600),
-                    use_container_width=True)
+    fig_c = go.Figure(go.Candlestick(x=data_main.index, open=data_main['Open'], high=data_main['High'], low=data_main['Low'], close=data_main['Close']))
+    st.plotly_chart(fig_c.update_layout(title="Candlestick", height=600), use_container_width=True)
 
 # ====================== PREDICTIONS ======================
 elif tab == "Predictions":
@@ -269,8 +177,7 @@ elif tab == "Predictions":
 
     if model == "Prophet" and len(data_main) >= 30:
         with st.spinner("Running Prophet..."):
-            df_p = data_main.reset_index()[['Date', 'Adj Close']] \
-                     .rename(columns={'Date': 'ds', 'Adj Close': 'y'})
+            df_p = data_main.reset_index()[['Date', 'Adj Close']].rename(columns={'Date': 'ds', 'Adj Close': 'y'})
             m = Prophet()
             m.fit(df_p)
             future = m.make_future_dataframe(periods=days)
@@ -284,37 +191,25 @@ elif tab == "Predictions":
     elif model == "LSTM" and len(data_main) >= 60:
         with st.spinner("Training LSTM..."):
             scaler = MinMaxScaler()
-            scaled = scaler.fit_transform(data_main['Adj Close'].values.reshape(-1, 1))
+            scaled = scaler.fit_transform(data_main['Adj Close'].values.reshape(-1,1))
             X, y = [], []
             for i in range(60, len(scaled)):
                 X.append(scaled[i-60:i, 0])
                 y.append(scaled[i, 0])
             X, y = np.array(X), np.array(y)
             X = X.reshape((X.shape[0], 60, 1))
-
-            lstm = Sequential([
-                LSTM(50, return_sequences=True, input_shape=(60, 1)),
-                LSTM(50),
-                Dense(1)
-            ])
+            lstm = Sequential([LSTM(50, return_sequences=True, input_shape=(60,1)), LSTM(50), Dense(1)])
             lstm.compile('adam', 'mse')
             lstm.fit(X, y, epochs=3, batch_size=32, verbose=0)
-
-            last = scaled[-60:].reshape(1, 60, 1)
+            last = scaled[-60:].reshape(1,60,1)
             preds = []
             for _ in range(days):
                 p = lstm.predict(last, verbose=0)[0][0]
                 preds.append(p)
-                last = np.append(last[:, 1:, :], [[[p]]], axis=1)
-
-            pred_vals = scaler.inverse_transform(np.array(preds).reshape(-1, 1)).flatten()
-            pred_df = pd.DataFrame({
-                'Date': pd.date_range(start=data_main.index[-1] + pd.Timedelta(days=1),
-                                      periods=days),
-                'Predicted': pred_vals
-            })
-            fig = px.line(pred_df, x='Date', y='Predicted',
-                          title="LSTM Forecast")
+                last = np.append(last[:,1:,:], [[[p]]], axis=1)
+            pred_vals = scaler.inverse_transform(np.array(preds).reshape(-1,1)).flatten()
+            pred_df = pd.DataFrame({'Date': pd.date_range(start=data_main.index[-1]+pd.Timedelta(days=1), periods=days), 'Predicted': pred_vals})
+            fig = px.line(pred_df, x='Date', y='Predicted', title="LSTM Forecast")
             st.plotly_chart(fig, use_container_width=True)
             st.dataframe(pred_df.style.format({"Predicted": "{:.2f}"}))
 
@@ -328,9 +223,7 @@ elif tab == "Sentiment":
 
     def color(val):
         return f"color: {'green' if val > 0.1 else 'red' if val < -0.1 else 'gray'}"
-
-    st.dataframe(df.style.applymap(color, subset=['Score'])
-                 .format({'Score': '{:.3f}'}), use_container_width=True)
+    st.dataframe(df.style.applymap(color, subset=['Score']).format({'Score': '{:.3f}'}), use_container_width=True)
 
     pos = sum(1 for s in vader_scores if s > 0.1)
     neg = sum(1 for s in vader_scores if s < -0.1)
@@ -351,14 +244,9 @@ elif tab == "Comparison":
     df_compare = (data_compare['Adj Close'] / base_compare - 1) * 100
 
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=data_main.index, y=df_main,
-                             name=selected_ticker,
-                             line=dict(color='#26A69A')))
-    fig.add_trace(go.Scatter(x=data_compare.index, y=df_compare,
-                             name=compare_ticker,
-                             line=dict(color='#AB47BC')))
-    fig.update_layout(title="Performance (%)", height=600,
-                      template="plotly_white")
+    fig.add_trace(go.Scatter(x=data_main.index, y=df_main, name=selected_ticker, line=dict(color='#26A69A')))
+    fig.add_trace(go.Scatter(x=data_compare.index, y=df_compare, name=compare_ticker, line=dict(color='#AB47BC')))
+    fig.update_layout(title="Performance (%)", height=600, template="plotly_white")
     st.plotly_chart(fig, use_container_width=True)
 
     ret_main = (data_main['Adj Close'].iloc[-1] / base_main - 1) * 100
@@ -376,9 +264,13 @@ elif tab == "Comparison":
 st.markdown("---")
 st.markdown("### Latest Headlines (24/7)")
 
+# Duplicate headlines for seamless infinite scroll (original + copy)
 all_headlines = news_headlines + news_headlines
+
+# Calculate animation duration based on number of headlines (3 seconds per headline for slower scroll, min 15s)
 animation_duration = max(15, len(news_headlines) * 3)
 
+# CSS for robust, seamless vertical scrolling ticker
 st.markdown(f"""
 <style>
 .ticker-container {{
@@ -404,18 +296,20 @@ st.markdown(f"""
     padding: 12px 0;
     font-size: 15px;
     line-height: 1.6;
-    min-height: 40px;
+    min-height: 40px;  /* Consistent spacing */
     overflow: hidden;
     text-overflow: ellipsis;
-    white-space: normal;
+    white-space: normal;  /* Allow wrapping for long titles */
     word-wrap: break-word;
 }}
 </style>
 """, unsafe_allow_html=True)
 
+# Build the entire HTML in one string to ensure it's rendered as a single block
 html_content = '<div class="ticker-container"><div class="ticker-wrapper">'
 for h in all_headlines:
     html_content += f'<div class="ticker-item">{h}</div>'
 html_content += '</div></div>'
 
+# Render the full HTML in one go
 st.markdown(html_content, unsafe_allow_html=True)
