@@ -17,7 +17,7 @@ from streamlit_option_menu import option_menu
 
 # ====================== INITIAL SETUP ======================
 nltk.download('vader_lexicon', quiet=True)
-sia = SentimentIntensityAnalyzer()  # Initialize VADER once
+sia = SentimentIntensityAnalyzer()
 current_date = datetime.now().date()
 
 st.set_page_config(page_title="FinSight", layout="wide")
@@ -48,11 +48,10 @@ ticker_obj = get_ticker(selected_ticker)
 # ====================== FETCH NEWS (NewsAPI + Yahoo Fallback) ======================
 @st.cache_data(ttl=300)
 def get_news(ticker):
-    # --- OPTION 1: Try NewsAPI (Recommended - 24/7, broad coverage) ---
     try:
-        api_key = st.secrets.get("NEWSAPI_KEY") or "d848a496d874401b9e2129a71adb57ba"  # Use Streamlit secrets or replace
+        api_key = st.secrets.get("NEWSAPI_KEY") or "d848a496d874401b9e2129a71adb57ba"
         if api_key and api_key != "YOUR_NEWSAPI_KEY":
-            url = f"https://newsapi.org/v2/everything"
+            url = "https://newsapi.org/v2/everything"
             params = {
                 'q': f'{ticker} stock OR {ticker} earnings OR {ticker} news',
                 'sortBy': 'publishedAt',
@@ -78,10 +77,10 @@ def get_news(ticker):
                             posts.append(f"{title} – {source}")
                             links.append(url)
                     return headlines, posts, links
-    except Exception as e:
-        st.warning(f"NewsAPI failed: {str(e)}. Using Yahoo Finance fallback.")
+    except:
+        st.warning("NewsAPI failed. Using Yahoo Finance.")
 
-    # --- OPTION 2: Fallback to Yahoo Finance ---
+    # Fallback: Yahoo Finance
     try:
         news = ticker_obj.news
         if not news or len(news) == 0:
@@ -100,18 +99,14 @@ def get_news(ticker):
                 links.append(url)
         return headlines if headlines else ["Market quiet."], posts, links
     except:
-        return ["News feed temporarily unavailable."], ["News feed temporarily unavailable."], ["#"]
+        return ["News feed unavailable."], ["News feed unavailable."], ["#"]
 
 news_headlines, news_posts, news_links = get_news(selected_ticker)
 
 # ====================== COMPUTE VADER SENTIMENT ======================
 @st.cache_data(ttl=300)
 def compute_vader_sentiment(posts):
-    scores = []
-    for post in posts:
-        score = sia.polarity_scores(post)['compound']
-        scores.append(score)
-    return scores
+    return [sia.polarity_scores(post)['compound'] for post in posts]
 
 vader_scores = compute_vader_sentiment(news_posts)
 
@@ -221,9 +216,9 @@ elif tab == "Predictions":
     else:
         st.error("Not enough data.")
 
-# ====================== SENTIMENT (VADER) ======================
+# ====================== SENTIMENT ======================
 elif tab == "Sentiment":
-    st.subheader("News Sentiment Analysis (VADER)")
+    st.subheader("News Sentiment (VADER)")
     df = pd.DataFrame({'News': news_posts, 'Link': news_links, 'Score': vader_scores})
 
     def color(val):
@@ -238,12 +233,11 @@ elif tab == "Sentiment":
     c2.metric("Negative", neg)
     c3.metric("Neutral", neu)
 
-    st.caption("Sentiment computed using VADER on real-time news. Works 24/7 for any ticker.")
+    st.caption("Real-time sentiment from news headlines (24/7)")
 
 # ====================== COMPARISON ======================
 elif tab == "Comparison":
     st.subheader(f"**{selected_ticker} vs {compare_ticker}**")
-
     base_main = data_main['Adj Close'].iloc[0]
     base_compare = data_compare['Adj Close'].iloc[0]
     df_main = (data_main['Adj Close'] / base_main - 1) * 100
@@ -266,14 +260,18 @@ elif tab == "Comparison":
     c3.metric(f"{selected_ticker} Vol", f"{vol_main:.1f}%")
     c4.metric(f"{compare_ticker} Vol", f"{vol_compare:.1f}%")
 
-# ====================== VERTICAL NEWS TICKER ======================
+# ====================== AUTO-SCROLLING NEWS TICKER (BOTTOM) ======================
 st.markdown("---")
 st.markdown("### Latest Headlines (24/7)")
 
-st.markdown("""
+# Duplicate headlines for seamless infinite scroll
+scroll_items = news_headlines * 3  # 3x for smooth loop
+
+# CSS + HTML for auto-scrolling
+st.markdown(f"""
 <style>
-.news-container {
-    height: 260px;
+.ticker-container {{
+    height: 280px;
     overflow: hidden;
     background: #0f172a;
     padding: 16px;
@@ -281,33 +279,31 @@ st.markdown("""
     box-shadow: 0 6px 24px rgba(0,0,0,0.3);
     color: white;
     font-family: 'Segoe UI', sans-serif;
-}
-.news-scroll {
-    animation: scroll-up 35s linear infinite;
-}
-@keyframes scroll-up {
-    0% { transform: translateY(0); }
-    100% { transform: translateY(-100%); }
-}
-.news-item {
-    padding: 11px 0;
+}}
+.ticker-wrapper {{
+    animation: scroll-ticker {len(scroll_items) * 3}s linear infinite;
+}}
+@keyframes scroll-ticker {{
+    0% {{ transform: translateY(0); }}
+    100% {{ transform: translateY(-{len(scroll_items) * 40}px); }}
+}}
+.ticker-item {{
+    padding: 10px 0;
     border-bottom: 1px solid #334155;
     font-size: 15px;
     line-height: 1.6;
-}
-.news-item:last-child {
+}}
+.ticker-item:last-child {{
     border-bottom: none;
-}
+}}
 </style>
 """, unsafe_allow_html=True)
 
-all_headlines = news_headlines + news_headlines
-
 with st.container():
-    st.markdown('<div class="news-container">', unsafe_allow_html=True)
-    st.markdown('<div class="news-scroll">', unsafe_allow_html=True)
-    for h in all_headlines:
-        st.markdown(f'<div class="news-item">{h}</div>', unsafe_allow_html=True)
+    st.markdown('<div class="ticker-container">', unsafe_allow_html=True)
+    st.markdown('<div class="ticker-wrapper">', unsafe_allow_html=True)
+    for item in scroll_items:
+        st.markdown(f'<div class="ticker-item">{item}</div>', unsafe_allow_html=True)
     st.markdown('</div></div>', unsafe_allow_html=True)
 
-st.caption("Live news from NewsAPI (24/7) or Yahoo Finance • Updates every 5 minutes")
+st.caption("Live news • Auto-scrolling • Updates every 5 minutes")
