@@ -14,6 +14,8 @@ from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import LSTM, Dense
 from sklearn.preprocessing import MinMaxScaler
 from streamlit_option_menu import option_menu
+import pandas_ta as ta  # For technical indicators
+import shap  # For Explainable AI
 
 # ====================== INITIAL SETUP ======================
 nltk.download('vader_lexicon', quiet=True)
@@ -110,7 +112,7 @@ def compute_vader_sentiment(posts):
 
 vader_scores = compute_vader_sentiment(news_posts)
 
-# ====================== FETCH STOCK DATA ======================
+# ====================== FETCH STOCK DATA WITH FEATURES ======================
 @st.cache_data(ttl=600)
 def fetch_stock_data(ticker, start, end):
     try:
@@ -120,12 +122,24 @@ def fetch_stock_data(ticker, start, end):
             return None
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.droplevel(1)
-        required = ['Open', 'High', 'Low', 'Close', 'Adj Close']
+        required = ['Open', 'High', 'Low', 'Close', 'Adj Close', 'Volume']
         if 'Adj Close' not in df.columns and 'Close' in df.columns:
             df['Adj Close'] = df['Close']
         df = df[required].dropna(how='all')
-        if len(df) < 30:
-            st.warning("Need 30+ days of data.")
+        
+        # Add technical indicators
+        df['SMA_10'] = ta.sma(df['Close'], length=10)
+        df['RSI'] = ta.rsi(df['Close'], length=14)
+        
+        # Add average sentiment (from recent news)
+        avg_sentiment = np.mean(vader_scores) if vader_scores else 0.0
+        df['Sentiment'] = avg_sentiment  # Constant for simplicity; in prod, time-varying
+        
+        feature_cols = ['Close', 'Volume', 'RSI', 'SMA_10', 'Sentiment']
+        df = df[required + ['SMA_10', 'RSI', 'Sentiment']].dropna(how='any')
+        
+        if len(df) < 60:
+            st.warning("Need 60+ days of data for LSTM.")
             return None
         return df
     except Exception as e:
@@ -190,28 +204,56 @@ elif tab == "Predictions":
 
     elif model == "LSTM" and len(data_main) >= 60:
         with st.spinner("Training LSTM..."):
+            # Features: Close, Volume, RSI, SMA_10, Sentiment
+            feature_cols = ['Close', 'Volume', 'RSI', 'SMA_10', 'Sentiment']
             scaler = MinMaxScaler()
-            scaled = scaler.fit_transform(data_main['Adj Close'].values.reshape(-1,1))
+            scaled_features = scaler.fit_transform(data_main[feature_cols])
+            
             X, y = [], []
-            for i in range(60, len(scaled)):
-                X.append(scaled[i-60:i, 0])
-                y.append(scaled[i, 0])
+            for i in range(60, len(scaled_features)):
+                X.append(scaled_features[i-60:i])
+                y.append(scaled_features[i, 0])  # Predict next Close
             X, y = np.array(X), np.array(y)
-            X = X.reshape((X.shape[0], 60, 1))
-            lstm = Sequential([LSTM(50, return_sequences=True, input_shape=(60,1)), LSTM(50), Dense(1)])
+            
+            # Reshape for LSTM: [samples, timesteps, features]
+            lstm = Sequential([LSTM(50, return_sequences=True, input_shape=(60, len(feature_cols))), 
+                               LSTM(50), Dense(1)])
             lstm.compile('adam', 'mse')
             lstm.fit(X, y, epochs=3, batch_size=32, verbose=0)
-            last = scaled[-60:].reshape(1,60,1)
+            
+            # Predict
+            last = scaled_features[-60:].reshape(1, 60, len(feature_cols))
             preds = []
             for _ in range(days):
                 p = lstm.predict(last, verbose=0)[0][0]
                 preds.append(p)
-                last = np.append(last[:,1:,:], [[[p]]], axis=1)
-            pred_vals = scaler.inverse_transform(np.array(preds).reshape(-1,1)).flatten()
+                # Update last for next step (simplified: shift and append to first feature)
+                last = np.roll(last, -1, axis=1)
+                last[0, -1, 0] = p
+            pred_vals = scaler.inverse_transform(np.column_stack([preds, np.zeros((days, len(feature_cols)-1))]))[:, 0]
             pred_df = pd.DataFrame({'Date': pd.date_range(start=data_main.index[-1]+pd.Timedelta(days=1), periods=days), 'Predicted': pred_vals})
             fig = px.line(pred_df, x='Date', y='Predicted', title="LSTM Forecast")
             st.plotly_chart(fig, use_container_width=True)
             st.dataframe(pred_df.style.format({"Predicted": "{:.2f}"}))
+
+            # ====================== EXPLAINABLE AI DASHBOARD ======================
+            with st.expander("Explain the Prediction (SHAP Analysis)"):
+                st.info("SHAP values show how each feature (e.g., RSI, Sentiment) contributed to the latest prediction.")
+                try:
+                    # Use KernelExplainer for LSTM (approximate)
+                    explainer = shap.KernelExplainer(lstm.predict, last)
+                    shap_values = explainer.shap_values(last)
+                    # Aggregate mean abs SHAP for bar chart (simplified for last sample)
+                    feature_names = feature_cols
+                    mean_shap = np.mean(np.abs(shap_values[0]), axis=0)
+                    shap_df = pd.DataFrame({'Feature': feature_names, 'Impact': mean_shap})
+                    fig_shap = px.bar(shap_df, x='Impact', y='Feature', orientation='h', 
+                                      title="Feature Impact on Prediction", 
+                                      color='Impact', color_continuous_scale='RdYlGn')
+                    fig_shap.update_layout(yaxis={'categoryorder':'total ascending'})
+                    st.plotly_chart(fig_shap, use_container_width=True)
+                except Exception as e:
+                    st.warning(f"SHAP computation failed: {e}. Ensure data sufficiency.")
 
     else:
         st.error("Not enough data.")
