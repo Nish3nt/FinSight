@@ -110,6 +110,32 @@ def compute_vader_sentiment(posts):
 
 vader_scores = compute_vader_sentiment(news_posts)
 
+# ====================== HUGGING FACE SENTIMENT (FOR SIMULATOR) ======================
+@st.cache_resource(ttl=3600)  # Cache for 1 hour
+def get_hf_sentiment(text, hf_token):
+    try:
+        if not hf_token or hf_token == "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":
+            raise ValueError("No HF token")
+        API_URL = "https://api-inference.huggingface.co/models/ProsusAI/finbert"
+        headers = {"Authorization": f"Bearer {hf_token}"}
+        payload = {"inputs": text}
+        response = requests.post(API_URL, headers=headers, json=payload, timeout=10)
+        if response.status_code == 200:
+            result = response.json()
+            if isinstance(result, list) and result:
+                top = max(result, key=lambda x: x['score'])
+                return top['label'], top['score']
+        raise ValueError("API error")
+    except Exception as e:
+        st.warning(f"HF API failed ({e}). Falling back to VADER.")
+        vader_score = sia.polarity_scores(text)['compound']
+        if vader_score > 0.1:
+            return 'positive', vader_score
+        elif vader_score < -0.1:
+            return 'negative', abs(vader_score)
+        else:
+            return 'neutral', 0.0
+
 # ====================== FETCH STOCK DATA ======================
 @st.cache_data(ttl=600)
 def fetch_stock_data(ticker, start, end):
@@ -141,8 +167,8 @@ if data_main is None or data_compare is None:
 # ====================== TABS ======================
 tab = option_menu(
     menu_title=None,
-    options=["Data & Viz", "Predictions", "Sentiment", "Comparison"],
-    icons=["table", "graph-up", "chat-dots", "arrow-left-right"],
+    options=["Data & Viz", "Predictions", "Sentiment", "Simulator", "Comparison"],
+    icons=["table", "graph-up", "chat-dots", "robot", "arrow-left-right"],
     orientation="horizontal"
 )
 
@@ -234,6 +260,105 @@ elif tab == "Sentiment":
     c3.metric("Neutral", neu)
 
     st.caption("Real-time sentiment from news headlines (24/7)")
+
+# ====================== SIMULATOR (NEW TAB) ======================
+elif tab == "Simulator":
+    st.subheader("News Impact Simulator")
+    st.info("Enter hypothetical news about the stock to simulate its price impact. The app analyzes sentiment and adjusts forecasts accordingly.")
+    
+    hypo_news = st.text_input("Hypothetical News", placeholder="e.g., AAPL announces revolutionary AI chip")
+    days = st.slider("Forecast Days", 1, 30, 7)
+    model = st.selectbox("Forecast Model", ["Prophet", "LSTM"], index=0)  # Default to Prophet for simplicity
+    
+    if st.button("Simulate Impact") and hypo_news:
+        with st.spinner("Analyzing news and simulating..."):
+            hf_token = st.secrets.get("HF_TOKEN") or "YOUR_HF_TOKEN"
+            label, score = get_hf_sentiment(hypo_news, hf_token)
+            
+            # Map sentiment to price multiplier (simple rule-based impact)
+            if label == 'positive':
+                multiplier = 0.05  # 5% uplift
+                impact = "Positive impact expected: +5% price shift"
+            elif label == 'negative':
+                multiplier = -0.05  # -5% drop
+                impact = "Negative impact expected: -5% price shift"
+            else:
+                multiplier = 0.0
+                impact = "Neutral impact: No price shift"
+            
+            st.success(f"Sentiment: **{label.upper()}** (Confidence: {score:.2f}) | {impact}")
+            
+            # Re-run forecast with adjustment
+            if model == "Prophet" and len(data_main) >= 30:
+                df_p = data_main.reset_index()[['Date', 'Adj Close']].rename(columns={'Date': 'ds', 'Adj Close': 'y'})
+                m = Prophet()
+                m.fit(df_p)
+                future = m.make_future_dataframe(periods=days)
+                forecast = m.predict(future)
+                
+                # Original forecast
+                orig_future = forecast[['ds', 'yhat']].copy()
+                orig_future.columns = ['Date', 'Original']
+                
+                # Simulated: Adjust future yhat
+                last_historical_date = df_p['ds'].max()
+                future_mask = forecast['ds'] > last_historical_date
+                sim_forecast = forecast.copy()
+                sim_forecast.loc[future_mask, 'yhat'] *= (1 + multiplier)
+                sim_future = sim_forecast[['ds', 'yhat']].copy()
+                sim_future.columns = ['Date', 'Simulated']
+                
+                # Combine for plot
+                plot_df = orig_future.merge(sim_future, on='Date')
+                fig = px.line(plot_df, x='Date', y=['Original', 'Simulated'], 
+                              title=f"What-If Forecast: {hypo_news}", 
+                              labels={'value': 'Predicted Price'})
+                fig.add_vline(x=last_historical_date, line_dash="dash", line_color="red", 
+                              annotation_text="News Impact Starts Here")
+                st.plotly_chart(fig, use_container_width=True)
+                
+                st.dataframe(sim_future.style.format({"Simulated": "{:.2f}"}))
+            
+            elif model == "LSTM" and len(data_main) >= 60:
+                # Similar adjustment for LSTM
+                scaler = MinMaxScaler()
+                scaled = scaler.fit_transform(data_main['Adj Close'].values.reshape(-1,1))
+                X, y = [], []
+                for i in range(60, len(scaled)):
+                    X.append(scaled[i-60:i, 0])
+                    y.append(scaled[i, 0])
+                X, y = np.array(X), np.array(y)
+                X = X.reshape((X.shape[0], 60, 1))
+                lstm = Sequential([LSTM(50, return_sequences=True, input_shape=(60,1)), LSTM(50), Dense(1)])
+                lstm.compile('adam', 'mse')
+                lstm.fit(X, y, epochs=3, batch_size=32, verbose=0)
+                last = scaled[-60:].reshape(1,60,1)
+                preds = []
+                for _ in range(days):
+                    p = lstm.predict(last, verbose=0)[0][0]
+                    preds.append(p)
+                    last = np.append(last[:,1:,:], [[[p]]], axis=1)
+                pred_vals = scaler.inverse_transform(np.array(preds).reshape(-1,1)).flatten()
+                
+                # Original
+                orig_df = pd.DataFrame({'Date': pd.date_range(start=data_main.index[-1]+pd.Timedelta(days=1), periods=days), 'Original': pred_vals})
+                
+                # Simulated: Adjust predictions
+                sim_vals = pred_vals * (1 + multiplier)
+                sim_df = pd.DataFrame({'Date': orig_df['Date'], 'Simulated': sim_vals})
+                
+                # Plot
+                plot_df = orig_df.merge(sim_df, on='Date')
+                fig = px.line(plot_df, x='Date', y=['Original', 'Simulated'], 
+                              title=f"LSTM What-If: {hypo_news}", 
+                              labels={'value': 'Predicted Price'})
+                st.plotly_chart(fig, use_container_width=True)
+                
+                st.dataframe(sim_df.style.format({"Simulated": "{:.2f}"}))
+            else:
+                st.error("Not enough data for simulation.")
+    elif st.button("Simulate Impact"):
+        st.warning("Please enter hypothetical news.")
 
 # ====================== COMPARISON ======================
 elif tab == "Comparison":
