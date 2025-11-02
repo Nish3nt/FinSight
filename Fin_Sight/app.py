@@ -267,8 +267,8 @@ st.markdown("### Latest Headlines (24/7)")
 # Duplicate headlines for seamless infinite scroll (original + copy)
 all_headlines = news_headlines + news_headlines
 
-# Calculate animation duration based on number of headlines (2 seconds per headline, min 10s)
-animation_duration = max(10, len(news_headlines) * 2)
+# Calculate animation duration based on number of headlines (3 seconds per headline for slower scroll, min 15s)
+animation_duration = max(15, len(news_headlines) * 3)
 
 # CSS for robust, seamless vertical scrolling ticker
 st.markdown(f"""
@@ -297,8 +297,11 @@ st.markdown(f"""
     border-bottom: 1px solid #334155;
     font-size: 15px;
     line-height: 1.6;
-    min-height: 40px;  /* Ensures minimum spacing */
-    overflow: hidden;  /* Prevents long titles from breaking layout */
+    min-height: 40px;  /* Consistent spacing */
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: normal;  /* Allow wrapping for long titles */
+    word-wrap: break-word;
 }}
 .ticker-item:last-child {{
     border-bottom: none;
@@ -306,11 +309,13 @@ st.markdown(f"""
 </style>
 """, unsafe_allow_html=True)
 
-with st.container():
-    st.markdown('<div class="ticker-container">', unsafe_allow_html=True)
-    st.markdown('<div class="ticker-wrapper">', unsafe_allow_html=True)
-    for h in all_headlines:
-        st.markdown(f'<div class="ticker-item">{h}</div>', unsafe_allow_html=True)
-    st.markdown('</div></div>', unsafe_allow_html=True)
+# Build the entire HTML in one string to ensure it's rendered as a single block
+html_content = '<div class="ticker-container"><div class="ticker-wrapper">'
+for h in all_headlines:
+    html_content += f'<div class="ticker-item">{h}</div>'
+html_content += '</div></div>'
+
+# Render the full HTML in one go
+st.markdown(html_content, unsafe_allow_html=True)
 
 st.caption("Live news from NewsAPI or Yahoo Finance • Auto-scrolling 24/7 like CNBC • Updates every 5 minutes")
