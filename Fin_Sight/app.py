@@ -23,7 +23,7 @@ def free_ai(prompt):
     p = prompt.lower()
     if any(w in p for w in ["buy", "should"]): return f"Buy {selected_ticker} if price drops 5%."
     if "sell" in p: return f"Sell at ${price*1.1:.2f}."
-    return f"{selected_ticker} is strong. HOLDDDD!"
+    return f"{selected_ticker} is strong. Hold tight!"
 
 st.set_page_config(page_title="FinSight", layout="wide")
 st.markdown("""
@@ -49,12 +49,12 @@ def get_data(t):
     return yf.download(t, period="1y", progress=False)
 
 df = get_data(selected_ticker)
-price = df['Close'].iloc[-1]
+price = float(df['Close'].iloc[-1])  # FIXED: Force float
 
-# FIXED METRICS (NO { } INSIDE f"")
+# FIXED METRICS (Safe floats)
 c1, c2 = st.columns(2)
 c1.metric("Price", f"${price:.2f}")
-c2.metric("7D Change", f"{(price/df['Close'].iloc[-8]-1)*100:+.1f}%")
+c2.metric("7D Change", f"{((price / float(df['Close'].iloc[-8])) - 1) * 100:+.1f}%")
 
 tab = option_menu(None, ["AI", "Chart", "Forecast", "News", "PDF"],
                   icons=['robot', 'graph-up', 'crystal-ball', 'newspaper', 'file-pdf'],
