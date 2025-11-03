@@ -14,8 +14,6 @@ from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import LSTM, Dense
 from sklearn.preprocessing import MinMaxScaler
 from streamlit_option_menu import option_menu
-from streamlit_chat import message
-import math
 
 # ====================== INITIAL SETUP ======================
 nltk.download('vader_lexicon', quiet=True)
@@ -28,7 +26,7 @@ st.title("**FinSight**: Real-Time Stock Intelligence")
 # ====================== SIDEBAR ======================
 st.sidebar.header("Controls")
 tickers = ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'TSLA', 'NVDA', 'META', 'NFLX', 'AMD', 'JPM', 'V', 'XOM']
-selected_ticker = st.sidebar.selectbox("Main Stock", tickers, index=0)
+selected_ticker = st.sidebar.selectbox("Main Stock", tickers)
 compare_ticker = st.sidebar.selectbox("Compare With", tickers, index=1)
 start_date = st.sidebar.date_input("Start Date", pd.to_datetime('2018-01-01').date())
 end_date = st.sidebar.date_input("End Date", current_date)
@@ -40,271 +38,278 @@ if end_date > current_date:
     end_date = current_date
     st.warning(f"End date capped at today: {current_date}")
 
-# ====================== FETCH DATA ======================
+# ====================== FETCH TICKER OBJECT ======================
 @st.cache_resource(ttl=300)
 def get_ticker(ticker):
     return yf.Ticker(ticker)
 
 ticker_obj = get_ticker(selected_ticker)
 
+# ====================== FETCH NEWS (NewsAPI + Yahoo Fallback) ======================
 @st.cache_data(ttl=300)
 def get_news(ticker):
     try:
         api_key = st.secrets.get("NEWSAPI_KEY") or "d848a496d874401b9e2129a71adb57ba"
         if api_key and api_key != "YOUR_NEWSAPI_KEY":
             url = "https://newsapi.org/v2/everything"
-            r = requests.get(url, params={
-                'q': f'{ticker} stock', 'sortBy': 'publishedAt',
-                'pageSize': 15, 'language': 'en', 'apiKey': api_key
-            }, timeout=10)
+            params = {
+                'q': f'{ticker} stock OR {ticker} earnings OR {ticker} news',
+                'sortBy': 'publishedAt',
+                'pageSize': 15,
+                'language': 'en',
+                'apiKey': api_key
+            }
+            r = requests.get(url, params=params, timeout=10)
             if r.status_code == 200:
-                articles = r.json().get('articles', [])
-                headlines, posts, links = [], [], []
-                for a in articles:
-                    t = a.get('title', '').strip()
-                    s = a.get('source', {}).get('name', 'Source')
-                    u = a.get('url', '#')
-                    if t:
-                        hl = f"**{t}** – {s}"
-                        headlines.append(hl); posts.append(f"{t} – {s}"); links.append(u)
-                return headlines, posts, links
+                j = r.json()
+                articles = j.get('articles', [])
+                if articles:
+                    headlines = []
+                    posts = []
+                    links = []
+                    for art in articles:
+                        title = art.get('title', '').strip()
+                        source = art.get('source', {}).get('name', 'Source').strip()
+                        url = art.get('url', '#')
+                        if title:
+                            hl = f"**{title}** – {source}"
+                            headlines.append(hl)
+                            posts.append(f"{title} – {source}")
+                            links.append(url)
+                    return headlines, posts, links
     except:
-        pass
+        st.warning("NewsAPI failed. Using Yahoo Finance.")
 
+    # Fallback: Yahoo Finance
     try:
         news = ticker_obj.news
-        if not news: return ["No headlines."], [""], [""]
-        headlines, posts, links = [], [], []
+        if not news or len(news) == 0:
+            return ["No recent headlines."], ["No recent headlines."], ["#"]
+        headlines = []
+        posts = []
+        links = []
         for item in news[:15]:
-            t = item.get('title', '').strip()
-            p = item.get('publisher', 'Source')
-            u = item.get('link', '#')
-            if t:
-                hl = f"**{t}** – {p}"
-                headlines.append(hl); posts.append(f"{t} – {p}"); links.append(u)
-        return headlines or ["Market quiet."], posts, links
+            title = item.get('title', '').strip()
+            pub = item.get('publisher', 'Source').strip()
+            url = item.get('link', '#')
+            if title:
+                hl = f"**{title}** – {pub}"
+                headlines.append(hl)
+                posts.append(f"{title} – {pub}")
+                links.append(url)
+        return headlines if headlines else ["Market quiet."], posts, links
     except:
-        return ["News unavailable."], [""], ["#"]
+        return ["News feed unavailable."], ["News feed unavailable."], ["#"]
 
 news_headlines, news_posts, news_links = get_news(selected_ticker)
 
+# ====================== COMPUTE VADER SENTIMENT ======================
 @st.cache_data(ttl=300)
 def compute_vader_sentiment(posts):
-    return [sia.polarity_scores(p)['compound'] for p in posts]
+    return [sia.polarity_scores(post)['compound'] for post in posts]
 
 vader_scores = compute_vader_sentiment(news_posts)
 
+# ====================== FETCH STOCK DATA ======================
 @st.cache_data(ttl=600)
 def fetch_stock_data(ticker, start, end):
     try:
         df = yf.download(ticker, start=start, end=end, progress=False)
-        if df.empty: return None
-        if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.droplevel(1)
-        if 'Adj Close' not in df.columns: df['Adj Close'] = df['Close']
-        return df[['Open','High','Low','Close','Adj Close']].dropna(how='all')
-    except: return None
+        if df.empty:
+            st.error(f"No data for {ticker}.")
+            return None
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.droplevel(1)
+        required = ['Open', 'High', 'Low', 'Close', 'Adj Close']
+        if 'Adj Close' not in df.columns and 'Close' in df.columns:
+            df['Adj Close'] = df['Close']
+        df = df[required].dropna(how='all')
+        if len(df) < 30:
+            st.warning("Need 30+ days of data.")
+            return None
+        return df
+    except Exception as e:
+        st.error(f"Data fetch error: {e}")
+        return None
 
 data_main = fetch_stock_data(selected_ticker, start_date, end_date)
 data_compare = fetch_stock_data(compare_ticker, start_date, end_date)
 
 if data_main is None or data_compare is None:
-    st.error("Failed to load stock data.")
     st.stop()
-
-# ====================== 3D GLOBE ======================
-@st.cache_data(ttl=3600)
-def hero_globe(selected_ticker):
-    caps = {}
-    for t in tickers + ['BRK-B', 'UNH', 'MA']:
-        try: caps[t] = yf.Ticker(t).info.get('marketCap', 0) or 0
-        except: caps[t] = 0
-    try: caps[selected_ticker] = yf.Ticker(selected_ticker).info.get('marketCap', 0) or 0
-    except: pass
-
-    df = pd.DataFrame({'Ticker': list(caps.keys()), 'MarketCap': list(caps.values())})
-    df = df[df['MarketCap'] > 0].sort_values('MarketCap', ascending=False).head(15)
-
-    np.random.seed(42)
-    lat = np.random.uniform(-90, 90, len(df))
-    lon = np.random.uniform(-180, 180, len(df))
-    size = np.sqrt(df['MarketCap']) / 1e5
-
-    theta = np.deg2rad(90 - lat); phi = np.deg2rad(lon)
-    x = np.sin(theta) * np.cos(phi); y = np.sin(theta) * np.sin(phi); z = np.cos(theta)
-
-    fig = go.Figure(data=go.Scatter3d(
-        x=x, y=y, z=z, mode='markers+text',
-        marker=dict(size=size, color=size, colorscale='Viridis', opacity=0.9,
-                    showscale=True, colorbar=dict(title="Cap (B)")),
-        text=df['Ticker'], textposition="top center",
-        hovertemplate="<b>%{text}</b><br>Cap: $%{marker.color:,.0f}B"
-    ))
-    fig.update_layout(
-        title=f"3D Market-Cap Globe – {selected_ticker}",
-        scene=dict(xaxis_visible=False, yaxis_visible=False, zaxis_visible=False,
-                   camera=dict(eye=dict(x=1.5, y=1.5, z=1.5)), aspectmode='cube'),
-        height=400, margin=dict(l=0,r=0,t=40,b=0),
-        paper_bgcolor="rgba(0,0,0,0)", scene_bgcolor="#0f172a"
-    )
-    return fig
-
-if 'last_ticker' not in st.session_state: st.session_state.last_ticker = None
-if 'current_fig' not in st.session_state: st.session_state.current_fig = None
-if st.session_state.last_ticker != selected_ticker:
-    st.session_state.last_ticker = selected_ticker
-    with st.spinner("Loading 3D Globe..."):
-        st.session_state.current_fig = hero_globe(selected_ticker)
-if st.session_state.current_fig:
-    st.plotly_chart(st.session_state.current_fig, use_container_width=True)
-
-# ====================== KPI BANNER ======================
-col1, col2, col3, col4 = st.columns(4)
-try:
-    price = data_main['Close'].iloc[-1]
-    change_7d = (price - data_main['Close'].iloc[-8]) / data_main['Close'].iloc[-8] * 100 if len(data_main) > 7 else None
-    vol = data_main['Close'].pct_change().std() * np.sqrt(252) * 100 if len(data_main) > 1 else None
-    cap = ticker_obj.info.get('marketCap', 0) / 1e9
-    col1.metric("Price", f"${price:,.2f}")
-    col2.metric("7D Change", f"{change_7d:+.2f}%" if change_7d else "N/A")
-    col3.metric("Volatility", f"{vol:.1f}%" if vol else "N/A")
-    col4.metric("Market Cap", f"${cap:,.1f}B" if cap else "N/A")
-except:
-    col1.metric("Price", "N/A")
 
 # ====================== TABS ======================
 tab = option_menu(
     menu_title=None,
-    options=["Data & Viz", "Predictions", "Sentiment", "Comparison", "Chatbot"],
-    icons=["table", "graph-up", "chat-dots", "arrow-left-right", "robot"],
+    options=["Data & Viz", "Predictions", "Sentiment", "Comparison"],
+    icons=["table", "graph-up", "chat-dots", "arrow-left-right"],
     orientation="horizontal"
 )
 
-# ====================== RULE-BASED CHATBOT ======================
-def rule_based_reply(prompt):
-    p = prompt.lower()
-    if any(w in p for w in ["price", "cost"]): 
-        return f"Latest price: ${data_main['Close'].iloc[-1]:,.2f}"
-    if any(w in p for w in ["forecast", "predict", "future"]): 
-        return "Go to **Predictions** tab → select Prophet or LSTM."
-    if any(w in p for w in ["news", "sentiment"]): 
-        return "Check **Sentiment** tab for real-time news analysis."
-    if "compare" in p: 
-        return "Use **Comparison** tab to compare with another stock."
-    if any(w in p for w in ["best", "recommend", "top"]):
-        returns = {}
-        for t in tickers[:5]:
-            df = fetch_stock_data(t, start_date, end_date)
-            if df is not None and len(df) > 1:
-                returns[t] = df['Close'].pct_change().mean()
-        best = max(returns, key=returns.get) if returns else selected_ticker
-        return f"Top performer: **{best}**"
-    return "Ask about price, forecast, sentiment, or comparison!"
-
-if tab == "Chatbot":
-    st.subheader("FinSight Assistant")
-
-    if "messages" not in st.session_state:
-        st.session_state.messages = [
-            {"role": "assistant", "content": f"Ask me about **{selected_ticker}** – price, forecast, news, or recommendations!"}
-        ]
-
-    for msg in st.session_state.messages:
-        message(msg["content"], is_user=msg["role"]=="user", key=str(hash(msg["content"])))
-
-    if prompt := st.chat_input("Ask anything..."):
-        st.session_state.messages.append({"role": "user", "content": prompt})
-        message(prompt, is_user=True)
-
-        with st.spinner("Thinking..."):
-            reply = rule_based_reply(prompt)
-
-        st.session_state.messages.append({"role": "assistant", "content": reply})
-        message(reply)
-
-# ====================== OTHER TABS ======================
+# ====================== DATA & VIZ ======================
 if tab == "Data & Viz":
     st.subheader(f"**{selected_ticker}** – Price History")
     st.dataframe(data_main.tail(100), use_container_width=True)
-    st.download_button("Download CSV", data_main.to_csv().encode('utf-8'), f"{selected_ticker}.csv")
+    st.download_button("Download CSV", data_main.to_csv().encode(), f"{selected_ticker}.csv")
+
     fig = px.line(data_main, x=data_main.index, y='Adj Close', title="Price Trend")
     st.plotly_chart(fig, use_container_width=True)
-    fig_c = go.Figure(go.Candlestick(x=data_main.index, open=data_main['Open'], high=data_main['High'],
-                                     low=data_main['Low'], close=data_main['Close']))
+
+    c1, c2, c3 = st.columns(3)
+    try:
+        close = data_main['Close'].iloc[-1]
+        change = (close - data_main['Close'].iloc[-8]) / data_main['Close'].iloc[-8] * 100 if len(data_main) > 7 else 0
+        vol = data_main['Close'].pct_change().std() * np.sqrt(252) * 100
+        c1.metric("Price", f"${close:,.2f}")
+        c2.metric("7D Δ", f"{change:+.2f}%")
+        c3.metric("Volatility", f"{vol:.1f}%")
+    except:
+        c1.metric("Price", "N/A")
+
+    fig_c = go.Figure(go.Candlestick(x=data_main.index, open=data_main['Open'], high=data_main['High'], low=data_main['Low'], close=data_main['Close']))
     st.plotly_chart(fig_c.update_layout(title="Candlestick", height=600), use_container_width=True)
 
+# ====================== PREDICTIONS ======================
 elif tab == "Predictions":
     st.subheader("Price Forecast")
     model = st.selectbox("Model", ["Prophet", "LSTM"])
     days = st.slider("Days", 1, 30, 7)
-    if st.button("Run Forecast"):
-        if model == "Prophet" and len(data_main) >= 30:
-            with st.spinner("Running Prophet..."):
-                df_p = data_main.reset_index()[['Date','Adj Close']].rename(columns={'Date':'ds','Adj Close':'y'})
-                m = Prophet(); m.fit(df_p)
-                future = m.make_future_dataframe(periods=days)
-                forecast = m.predict(future)
-                fig = plot_plotly(m, forecast)
-                st.plotly_chart(fig, use_container_width=True)
-        elif model == "LSTM" and len(data_main) >= 60:
-            with st.spinner("Training LSTM..."):
-                scaler = MinMaxScaler()
-                scaled = scaler.fit_transform(data_main['Adj Close'].values.reshape(-1,1))
-                X, y = [], []
-                for i in range(60, len(scaled)):
-                    X.append(scaled[i-60:i,0]); y.append(scaled[i,0])
-                X, y = np.array(X), np.array(y); X = X.reshape((X.shape[0],60,1))
-                lstm = Sequential([LSTM(50,return_sequences=True,input_shape=(60,1)), LSTM(50), Dense(1)])
-                lstm.compile('adam','mse'); lstm.fit(X,y,epochs=3,batch_size=32,verbose=0)
-                last = scaled[-60:].reshape(1,60,1)
-                preds = []
-                for _ in range(days):
-                    p = lstm.predict(last,verbose=0)[0][0]
-                    preds.append(p); last = np.append(last[:,1:,:],[[[p]]],axis=1)
-                pred_vals = scaler.inverse_transform(np.array(preds).reshape(-1,1)).flatten()
-                pred_df = pd.DataFrame({'Date':pd.date_range(start=data_main.index[-1]+pd.Timedelta(days=1),periods=days),'Predicted':pred_vals})
-                fig = px.line(pred_df, x='Date', y='Predicted', title="LSTM Forecast")
-                st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.error("Not enough data.")
 
+    if model == "Prophet" and len(data_main) >= 30:
+        with st.spinner("Running Prophet..."):
+            df_p = data_main.reset_index()[['Date', 'Adj Close']].rename(columns={'Date': 'ds', 'Adj Close': 'y'})
+            m = Prophet()
+            m.fit(df_p)
+            future = m.make_future_dataframe(periods=days)
+            forecast = m.predict(future)
+            pred = forecast[['ds', 'yhat']].tail(days)
+            pred.columns = ['Date', 'Predicted']
+            fig = plot_plotly(m, forecast)
+            st.plotly_chart(fig, use_container_width=True)
+            st.dataframe(pred.style.format({"Predicted": "{:.2f}"}))
+
+    elif model == "LSTM" and len(data_main) >= 60:
+        with st.spinner("Training LSTM..."):
+            scaler = MinMaxScaler()
+            scaled = scaler.fit_transform(data_main['Adj Close'].values.reshape(-1,1))
+            X, y = [], []
+            for i in range(60, len(scaled)):
+                X.append(scaled[i-60:i, 0])
+                y.append(scaled[i, 0])
+            X, y = np.array(X), np.array(y)
+            X = X.reshape((X.shape[0], 60, 1))
+            lstm = Sequential([LSTM(50, return_sequences=True, input_shape=(60,1)), LSTM(50), Dense(1)])
+            lstm.compile('adam', 'mse')
+            lstm.fit(X, y, epochs=3, batch_size=32, verbose=0)
+            last = scaled[-60:].reshape(1,60,1)
+            preds = []
+            for _ in range(days):
+                p = lstm.predict(last, verbose=0)[0][0]
+                preds.append(p)
+                last = np.append(last[:,1:,:], [[[p]]], axis=1)
+            pred_vals = scaler.inverse_transform(np.array(preds).reshape(-1,1)).flatten()
+            pred_df = pd.DataFrame({'Date': pd.date_range(start=data_main.index[-1]+pd.Timedelta(days=1), periods=days), 'Predicted': pred_vals})
+            fig = px.line(pred_df, x='Date', y='Predicted', title="LSTM Forecast")
+            st.plotly_chart(fig, use_container_width=True)
+            st.dataframe(pred_df.style.format({"Predicted": "{:.2f}"}))
+
+    else:
+        st.error("Not enough data.")
+
+# ====================== SENTIMENT ======================
 elif tab == "Sentiment":
     st.subheader("News Sentiment")
     df = pd.DataFrame({'News': news_posts, 'Link': news_links, 'Score': vader_scores})
-    def color(v): return f"color: {'green' if v>0.1 else 'red' if v<-0.1 else 'gray'}"
-    st.dataframe(df.style.applymap(color, subset=['Score']).format({'Score':'{:.3f}'}), use_container_width=True)
-    pos = sum(1 for s in vader_scores if s>0.1)
-    neg = sum(1 for s in vader_scores if s<-0.1)
-    neu = len(vader_scores) - pos - neg
-    c1,c2,c3 = st.columns(3)
-    c1.metric("Positive", pos); c2.metric("Negative", neg); c3.metric("Neutral", neu)
 
+    def color(val):
+        return f"color: {'green' if val > 0.1 else 'red' if val < -0.1 else 'gray'}"
+    st.dataframe(df.style.applymap(color, subset=['Score']).format({'Score': '{:.3f}'}), use_container_width=True)
+
+    pos = sum(1 for s in vader_scores if s > 0.1)
+    neg = sum(1 for s in vader_scores if s < -0.1)
+    neu = len(vader_scores) - pos - neg
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Positive", pos)
+    c2.metric("Negative", neg)
+    c3.metric("Neutral", neu)
+
+    st.caption("Real-time sentiment from news headlines (24/7)")
+
+# ====================== COMPARISON ======================
 elif tab == "Comparison":
     st.subheader(f"**{selected_ticker} vs {compare_ticker}**")
-    base1 = data_main['Adj Close'].iloc[0]
-    base2 = data_compare['Adj Close'].iloc[0]
-    perf1 = (data_main['Adj Close']/base1 - 1)*100
-    perf2 = (data_compare['Adj Close']/base2 - 1)*100
+    base_main = data_main['Adj Close'].iloc[0]
+    base_compare = data_compare['Adj Close'].iloc[0]
+    df_main = (data_main['Adj Close'] / base_main - 1) * 100
+    df_compare = (data_compare['Adj Close'] / base_compare - 1) * 100
+
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=data_main.index, y=perf1, name=selected_ticker, line=dict(color='#26A69A')))
-    fig.add_trace(go.Scatter(x=data_compare.index, y=perf2, name=compare_ticker, line=dict(color='#AB47BC')))
+    fig.add_trace(go.Scatter(x=data_main.index, y=df_main, name=selected_ticker, line=dict(color='#26A69A')))
+    fig.add_trace(go.Scatter(x=data_compare.index, y=df_compare, name=compare_ticker, line=dict(color='#AB47BC')))
     fig.update_layout(title="Performance (%)", height=600, template="plotly_white")
     st.plotly_chart(fig, use_container_width=True)
 
-# ====================== NEWS TICKER ======================
+    ret_main = (data_main['Adj Close'].iloc[-1] / base_main - 1) * 100
+    ret_compare = (data_compare['Adj Close'].iloc[-1] / base_compare - 1) * 100
+    vol_main = data_main['Adj Close'].pct_change().std() * np.sqrt(252) * 100
+    vol_compare = data_compare['Adj Close'].pct_change().std() * np.sqrt(252) * 100
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric(f"{selected_ticker} Return", f"{ret_main:+.2f}%")
+    c2.metric(f"{compare_ticker} Return", f"{ret_compare:+.2f}%")
+    c3.metric(f"{selected_ticker} Vol", f"{vol_main:.1f}%")
+    c4.metric(f"{compare_ticker} Vol", f"{vol_compare:.1f}%")
+
+# ====================== AUTO-SCROLLING NEWS TICKER (BOTTOM) ======================
 st.markdown("---")
-st.markdown("### Latest Headlines")
+st.markdown("### Latest Headlines (24/7)")
+
+# Duplicate headlines for seamless infinite scroll (original + copy)
 all_headlines = news_headlines + news_headlines
-duration = max(15, len(news_headlines)*3)
+
+# Calculate animation duration based on number of headlines (3 seconds per headline for slower scroll, min 15s)
+animation_duration = max(15, len(news_headlines) * 3)
+
+# CSS for robust, seamless vertical scrolling ticker
 st.markdown(f"""
 <style>
-.ticker-container {{height:180px;overflow:hidden;background:#0f172a;padding:16px;border-radius:14px;
-    box-shadow:0 6px 24px rgba(0,0,0,0.3);color:white;font-family:'Segoe UI',sans-serif;}}
-.ticker-wrapper {{animation:scroll-up {duration}s linear infinite;}}
-@keyframes scroll-up {{0%{{transform:translateY(0)}}100%{{transform:translateY(-50%)}}}}
-.ticker-item {{padding:12px 0;font-size:15px;line-height:1.6;min-height:40px;}}
+.ticker-container {{
+    height: 180px;
+    overflow: hidden;
+    background: #0f172a;
+    padding: 16px;
+    border-radius: 14px;
+    box-shadow: 0 6px 24px rgba(0,0,0,0.3);
+    color: white;
+    font-family: 'Segoe UI', sans-serif;
+    position: relative;
+}}
+.ticker-wrapper {{
+    animation: scroll-up {animation_duration}s linear infinite;
+    will-change: transform;
+}}
+@keyframes scroll-up {{
+    0% {{ transform: translateY(0); }}
+    100% {{ transform: translateY(-50%); }}
+}}
+.ticker-item {{
+    padding: 12px 0;
+    font-size: 15px;
+    line-height: 1.6;
+    min-height: 40px;  /* Consistent spacing */
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: normal;  /* Allow wrapping for long titles */
+    word-wrap: break-word;
+}}
 </style>
 """, unsafe_allow_html=True)
-html = '<div class="ticker-container"><div class="ticker-wrapper">'
-for h in all_headlines: html += f'<div class="ticker-item">{h}</div>'
-html += '</div></div>'
-st.markdown(html, unsafe_allow_html=True)
+
+# Build the entire HTML in one string to ensure it's rendered as a single block
+html_content = '<div class="ticker-container"><div class="ticker-wrapper">'
+for h in all_headlines:
+    html_content += f'<div class="ticker-item">{h}</div>'
+html_content += '</div></div>'
+
+# Render the full HTML in one go
+st.markdown(html_content, unsafe_allow_html=True)
