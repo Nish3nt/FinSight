@@ -15,12 +15,7 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet
 import io
 import base64
-import threading
-import time
-import requests
-from telegram import Bot
 
-# ====================== 100% CLEAN ======================
 nltk.download('vader_lexicon', quiet=True)
 sia = SentimentIntensityAnalyzer()
 
@@ -28,7 +23,7 @@ def free_ai(prompt):
     p = prompt.lower()
     if any(w in p for w in ["buy", "should"]): return f"Buy {selected_ticker} if price drops 5%."
     if "sell" in p: return f"Sell at ${price*1.1:.2f}."
-    return f"{selected_ticker} is strong. Hold tight!"
+    return f"{selected_ticker} is strong. HOLDDDD!"
 
 st.set_page_config(page_title="FinSight", layout="wide")
 st.markdown("""
@@ -41,7 +36,6 @@ st.markdown("""
 
 st.markdown("<h1 style='text-align:center; color:#00D4FF;'>FinSight FREE AI</h1>", unsafe_allow_html=True)
 
-# ====================== SIDEBAR ======================
 with st.sidebar:
     st.image("https://img.icons8.com/fluency/80/robot.png")
     st.header("FREE AI")
@@ -50,24 +44,22 @@ with st.sidebar:
     global selected_ticker
     selected_ticker = st.selectbox("Stock", tickers)
 
-# ====================== DATA ======================
 @st.cache_data(ttl=300)
-def get_data(t): return yf.download(t, period="1y", progress=False)
+def get_data(t): 
+    return yf.download(t, period="1y", progress=False)
 
 df = get_data(selected_ticker)
 price = df['Close'].iloc[-1]
 
-# ====================== HERO ======================
+# FIXED METRICS (NO { } INSIDE f"")
 c1, c2 = st.columns(2)
 c1.metric("Price", f"${price:.2f}")
-c2.metric("7D", f"{(price/df['Close'].iloc[-8]-1)*100:+.1f}%")
+c2.metric("7D Change", f"{(price/df['Close'].iloc[-8]-1)*100:+.1f}%")
 
-# ====================== TABS ======================
 tab = option_menu(None, ["AI", "Chart", "Forecast", "News", "PDF"],
                   icons=['robot', 'graph-up', 'crystal-ball', 'newspaper', 'file-pdf'],
                   orientation="horizontal")
 
-# ====================== AI ======================
 if tab == "AI":
     st.subheader("FREE AI Chat")
     if "msgs" not in st.session_state: st.session_state.msgs = []
@@ -81,14 +73,12 @@ if tab == "AI":
         st.session_state.msgs.append({"text": reply, "user": False})
         message(reply)
 
-# ====================== CHART ======================
 elif tab == "Chart":
     fig = go.Figure()
     fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close']))
     fig.update_layout(height=600, template="plotly_dark")
     st.plotly_chart(fig, use_container_width=True)
 
-# ====================== FORECAST ======================
 elif tab == "Forecast":
     df_p = df.reset_index()[['Date', 'Close']].rename(columns={'Date':'ds', 'Close':'y'})
     m = Prophet()
@@ -100,7 +90,6 @@ elif tab == "Forecast":
     fig.add_trace(go.Scatter(x=f['ds'], y=f['yhat'], name="Forecast"))
     st.plotly_chart(fig, use_container_width=True)
 
-# ====================== NEWS ======================
 elif tab == "News":
     try:
         news = NewsApiClient("d848a496d874401b9e2129a71adb57ba").get_everything(q=selected_ticker, page_size=3)['articles']
@@ -110,7 +99,6 @@ elif tab == "News":
     except:
         st.write("News loading...")
 
-# ====================== PDF ======================
 elif tab == "PDF":
     if st.button("Download PDF"):
         buffer = io.BytesIO()
@@ -123,7 +111,6 @@ elif tab == "PDF":
         href = f'<a href="data:application/pdf;base64,{b64}" download="report.pdf">Download</a>'
         st.markdown(href, unsafe_allow_html=True)
 
-# ====================== TICKER ======================
 st.markdown(f"""
 <div class="ticker">
 {selected_ticker} @ ${price:.2f} • Ask AI: "Should I buy?"
