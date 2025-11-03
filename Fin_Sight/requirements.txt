@@ -13,3 +13,4 @@ requests
 transformers 
 sentencepiece 
 streamlit-chat
+torch
