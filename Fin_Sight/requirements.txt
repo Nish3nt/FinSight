@@ -10,7 +10,7 @@ prophet
 tensorflow
 streamlit-option-menu
 requests
-transformers 
-sentencepiece 
+transformers
+sentencepiece
 streamlit-chat
 torch
