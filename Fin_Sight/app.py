@@ -16,14 +16,12 @@ from sklearn.preprocessing import MinMaxScaler
 from sklearn.metrics import mean_squared_error, r2_score
 import time
 from streamlit_option_menu import option_menu
-
 # ====================== INITIAL SETUP ======================
 nltk.download('vader_lexicon', quiet=True)
 sia = SentimentIntensityAnalyzer()
 current_date = datetime.now().date()
 st.set_page_config(page_title="FinSight", layout="wide")
 st.title("**FinSight**: Real-Time Stock Intelligence")
-
 # ====================== FULL S&P 500 TICKERS ======================
 tickers = [
     'A', 'AAPL', 'ABBV', 'ABNB', 'ABT', 'ACGL', 'ACN', 'ADBE', 'ADI', 'ADM', 'ADP', 'ADSK', 'AEE', 'AEP', 'AES',
@@ -61,27 +59,23 @@ tickers = [
     'WM', 'WMB', 'WMT', 'WRB', 'WST', 'WTW', 'WY', 'WYNN', 'XEL', 'XOM', 'XYL', 'YUM', 'ZBH', 'ZBRA', 'ZTS'
 ]
 tickers = sorted(set(tickers))
-
 # ====================== SIDEBAR ======================
 st.sidebar.header("Controls")
 selected_ticker = st.sidebar.selectbox("Main Stock", tickers, index=tickers.index('AAPL') if 'AAPL' in tickers else 0)
 compare_ticker = st.sidebar.selectbox("Compare With", tickers, index=tickers.index('MSFT') if 'MSFT' in tickers else 1)
 start_date = st.sidebar.date_input("Start Date", pd.to_datetime('2018-01-01').date())
 end_date = st.sidebar.date_input("End Date", current_date)
-
 if start_date > end_date:
     st.error("Start date must be before end date.")
     st.stop()
 if end_date > current_date:
     end_date = current_date
     st.warning(f"End date capped at today: {current_date}")
-
 # ====================== FETCH TICKER OBJECT ======================
 @st.cache_resource(ttl=300)
 def get_ticker(ticker):
     return yf.Ticker(ticker)
 ticker_obj = get_ticker(selected_ticker)
-
 # ====================== FETCH NEWS (NewsAPI + Yahoo Fallback) ======================
 @st.cache_data(ttl=300)
 def get_news(ticker):
@@ -97,6 +91,8 @@ def get_news(ticker):
                 'apiKey': api_key
             }
             r = requests.get(url, params=params, timeout=10)
+            if r.status_code != 200:
+                st.warning(f"NewsAPI error: {r.status_code} - {r.json().get('message', 'Unknown error')}")
             if r.status_code == 200:
                 j = r.json()
                 articles = j.get('articles', [])
@@ -137,13 +133,11 @@ def get_news(ticker):
     except:
         return ["News feed unavailable."], ["News feed unavailable."], ["#"]
 news_headlines, news_posts, news_links = get_news(selected_ticker)
-
 # ====================== COMPUTE VADER SENTIMENT ======================
 @st.cache_data(ttl=300)
 def compute_vader_sentiment(posts):
     return [sia.polarity_scores(post)['compound'] for post in posts]
 vader_scores = compute_vader_sentiment(news_posts)
-
 # ====================== FETCH STOCK DATA ======================
 @st.cache_data(ttl=600)
 def fetch_stock_data(ticker, start, end):
@@ -169,7 +163,6 @@ data_main = fetch_stock_data(selected_ticker, start_date, end_date)
 data_compare = fetch_stock_data(compare_ticker, start_date, end_date)
 if data_main is None or data_compare is None:
     st.stop()
-
 # ====================== TABS ======================
 tab = option_menu(
     menu_title=None,
@@ -177,7 +170,6 @@ tab = option_menu(
     icons=["table", "graph-up", "chat-dots", "arrow-left-right", "pie-chart"],
     orientation="horizontal"
 )
-
 # ====================== DATA & VIZ ======================
 if tab == "Data & Viz":
     st.subheader(f"**{selected_ticker}** – Price History")
@@ -197,7 +189,6 @@ if tab == "Data & Viz":
         c1.metric("Price", "N/A")
     fig_c = go.Figure(go.Candlestick(x=data_main.index, open=data_main['Open'], high=data_main['High'], low=data_main['Low'], close=data_main['Close']))
     st.plotly_chart(fig_c.update_layout(title="Candlestick", height=600), use_container_width=True)
-
 # ====================== PREDICTIONS ======================
 elif tab == "Predictions":
     st.subheader("Price Forecast")
@@ -258,7 +249,6 @@ elif tab == "Predictions":
             c3.metric("Training Time", f"{training_time:.1f}s")
     else:
         st.error("Not enough data.")
-
 # ====================== SENTIMENT ======================
 elif tab == "Sentiment":
     st.subheader("News Sentiment")
@@ -274,7 +264,6 @@ elif tab == "Sentiment":
     c2.metric("Negative", neg)
     c3.metric("Neutral", neu)
     st.caption("Real-time sentiment from news headlines (24/7)")
-
 # ====================== COMPARISON ======================
 elif tab == "Comparison":
     st.subheader(f"**{selected_ticker} vs {compare_ticker}**")
@@ -296,7 +285,6 @@ elif tab == "Comparison":
     c2.metric(f"{compare_ticker} Return", f"{ret_compare:+.2f}%")
     c3.metric(f"{selected_ticker} Vol", f"{vol_main:.1f}%")
     c4.metric(f"{compare_ticker} Vol", f"{vol_compare:.1f}%")
-
 # ====================== PORTFOLIO ANALYZER ======================
 elif tab == "Portfolio Analyzer":
     st.subheader("Portfolio Analyzer")
@@ -328,7 +316,7 @@ elif tab == "Portfolio Analyzer":
             weights_np = np.array(weights)
             port_return = np.dot(mean_returns, weights_np)
             port_vol = np.sqrt(np.dot(weights_np.T, np.dot(cov_matrix, weights_np)))
-            risk_free = 0.03  # Assume 3%
+            risk_free = 0.03 # Assume 3%
             sharpe = (port_return - risk_free) / port_vol
             c1, c2, c3 = st.columns(3)
             c1.metric("Expected Return", f"{port_return * 100:.2f}%")
@@ -337,7 +325,6 @@ elif tab == "Portfolio Analyzer":
             corr_matrix = returns.corr()
             fig_heat = px.imshow(corr_matrix, text_auto=True, aspect="auto", color_continuous_scale='RdBu_r', title="Correlation Heatmap")
             st.plotly_chart(fig_heat, use_container_width=True)
-
 # ====================== AUTO-SCROLLING NEWS TICKER (BOTTOM) ======================
 st.markdown("---")
 st.markdown("### Latest Headlines (24/7)")
