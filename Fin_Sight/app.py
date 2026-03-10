@@ -201,110 +201,13 @@ if tab == "Data & Viz":
 # ====================== PREDICTIONS ======================
 elif tab == "Predictions":
 
-    st.subheader("Price Forecast")
+    st.subheader("Price Forecast using LSTM")
 
-    model = st.selectbox("Model", ["Prophet", "LSTM"])
-    days = st.slider("Days", 1, 30, 7)
+    days = st.slider("Forecast Days", 1, 30, 7)
 
-    # ====================== PROPHET ======================
-    if model == "Prophet" and len(data_main) >= 60:
+    if len(data_main) >= 60:
 
-        with st.spinner("Running Prophet..."):
-
-            df_p = data_main.reset_index()[['Date', 'Adj Close']]
-            df_p.columns = ['ds', 'y']
-
-            train_frac = 0.8
-            train_size = int(len(df_p) * train_frac)
-
-            time_step = 60
-
-            df_train = df_p.iloc[:train_size]
-
-            # Improved Prophet configuration
-            m = Prophet(
-                yearly_seasonality=True,
-                weekly_seasonality=True,
-                daily_seasonality=False,
-                changepoint_prior_scale=0.05
-            )
-
-            m.fit(df_train)
-
-            future = m.make_future_dataframe(
-                periods=len(df_p) - train_size + days,
-                freq='B'
-            )
-
-            forecast = m.predict(future)
-
-            forecast_idx = forecast.set_index("ds")
-
-            # ======================
-            # ALIGN WITH LSTM TEST DATES
-            # ======================
-
-            lstm_test_dates = data_main.index[train_size + time_step:]
-
-            aligned_dates = [
-                d for d in lstm_test_dates
-                if d in forecast_idx.index
-            ]
-
-            if len(aligned_dates) > 5:
-
-                prophet_pred = forecast_idx.loc[aligned_dates]["yhat"].values
-                prophet_actual = data_main.loc[aligned_dates]["Adj Close"].values
-
-                mse_prophet = mean_squared_error(prophet_actual, prophet_pred)
-                r2_prophet = r2_score(prophet_actual, prophet_pred)
-
-            else:
-
-                mse_prophet = None
-                r2_prophet = None
-
-            # ======================
-            # FUTURE FORECAST
-            # ======================
-
-            last_date = df_p['ds'].max()
-
-            future_pred = forecast[
-                forecast['ds'] > last_date
-            ][['ds', 'yhat']].head(days)
-
-            future_pred.columns = ['Date', 'Predicted']
-
-            fig = plot_plotly(m, forecast)
-            st.plotly_chart(fig, use_container_width=True)
-
-            st.dataframe(
-                future_pred.style.format({"Predicted": "{:.2f}"})
-            )
-
-            # ======================
-            # METRICS
-            # ======================
-
-            c1, c2, c3 = st.columns(3)
-
-            if mse_prophet is not None:
-
-                c1.metric("Prophet MSE", f"{mse_prophet:.3f}")
-                c2.metric("Prophet R²", f"{r2_prophet:.3f}")
-
-            else:
-
-                c1.metric("Prophet MSE", "Not enough aligned data")
-                c2.metric("Prophet R²", "Not enough aligned data")
-
-            c3.metric("Evaluation", "Same dates as LSTM")
-
-    # ====================== LSTM ======================
-    elif model == "LSTM" and len(data_main) >= 60:
-
-        with st.spinner("Training LSTM..."):
+        with st.spinner("Training LSTM model..."):
 
             scaler = MinMaxScaler()
 
@@ -325,7 +228,6 @@ elif tab == "Predictions":
                 y = []
 
                 for i in range(len(data) - time_step):
-
                     X.append(data[i:(i + time_step), 0])
                     y.append(data[i + time_step, 0])
 
@@ -340,12 +242,12 @@ elif tab == "Predictions":
             start_time = time.time()
 
             lstm = Sequential([
-                LSTM(50, return_sequences=True, input_shape=(60, 1)),
+                LSTM(50, return_sequences=True, input_shape=(time_step, 1)),
                 LSTM(50),
                 Dense(1)
             ])
 
-            lstm.compile(optimizer='adam', loss='mse')
+            lstm.compile(optimizer="adam", loss="mse")
 
             lstm.fit(
                 X_train,
@@ -357,6 +259,7 @@ elif tab == "Predictions":
 
             training_time = time.time() - start_time
 
+            # Test prediction
             test_pred = lstm.predict(X_test, verbose=0)
 
             test_pred_inv = scaler.inverse_transform(test_pred)
@@ -365,6 +268,7 @@ elif tab == "Predictions":
             mse = mean_squared_error(y_test_inv, test_pred_inv)
             r2 = r2_score(y_test_inv, test_pred_inv)
 
+            # Future forecasting
             last = scaled[-60:].reshape(1, 60, 1)
 
             preds = []
@@ -382,19 +286,19 @@ elif tab == "Predictions":
             ).flatten()
 
             pred_df = pd.DataFrame({
-                'Date': pd.date_range(
+                "Date": pd.date_range(
                     start=data_main.index[-1] + pd.Timedelta(days=1),
                     periods=days,
-                    freq='B'
+                    freq="B"
                 ),
-                'Predicted': pred_vals
+                "Predicted": pred_vals
             })
 
             fig = px.line(
                 pred_df,
-                x='Date',
-                y='Predicted',
-                title="LSTM Forecast"
+                x="Date",
+                y="Predicted",
+                title="LSTM Price Forecast"
             )
 
             st.plotly_chart(fig, use_container_width=True)
@@ -405,13 +309,12 @@ elif tab == "Predictions":
 
             c1, c2, c3 = st.columns(3)
 
-            c1.metric("LSTM MSE", f"{mse:.3f}")
-            c2.metric("LSTM R²", f"{r2:.3f}")
+            c1.metric("MSE", f"{mse:.3f}")
+            c2.metric("R²", f"{r2:.3f}")
             c3.metric("Training Time", f"{training_time:.1f}s")
 
     else:
-
-        st.error("Not enough data.")
+        st.error("Not enough data. Need at least 60 days.")
 
 # ====================== SENTIMENT ======================
 elif tab == "Sentiment":
