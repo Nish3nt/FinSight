@@ -221,10 +221,12 @@ elif tab == "Predictions":
 
             df_train = df_p.iloc[:train_size]
 
+            # Improved Prophet configuration
             m = Prophet(
-                daily_seasonality=False,
+                yearly_seasonality=True,
                 weekly_seasonality=True,
-                yearly_seasonality=True
+                daily_seasonality=False,
+                changepoint_prior_scale=0.05
             )
 
             m.fit(df_train)
@@ -244,17 +246,23 @@ elif tab == "Predictions":
 
             lstm_test_dates = data_main.index[train_size + time_step:]
 
-            lstm_test_dates = [
-                pd.Timestamp(d)
-                for d in lstm_test_dates
-                if pd.Timestamp(d) in forecast_idx.index
+            aligned_dates = [
+                d for d in lstm_test_dates
+                if d in forecast_idx.index
             ]
 
-            prophet_pred = forecast_idx.loc[lstm_test_dates]["yhat"].values
-            prophet_actual = data_main.loc[lstm_test_dates]["Adj Close"].values
+            if len(aligned_dates) > 5:
 
-            mse_prophet = mean_squared_error(prophet_actual, prophet_pred)
-            r2_prophet = r2_score(prophet_actual, prophet_pred)
+                prophet_pred = forecast_idx.loc[aligned_dates]["yhat"].values
+                prophet_actual = data_main.loc[aligned_dates]["Adj Close"].values
+
+                mse_prophet = mean_squared_error(prophet_actual, prophet_pred)
+                r2_prophet = r2_score(prophet_actual, prophet_pred)
+
+            else:
+
+                mse_prophet = None
+                r2_prophet = None
 
             # ======================
             # FUTURE FORECAST
@@ -275,10 +283,22 @@ elif tab == "Predictions":
                 future_pred.style.format({"Predicted": "{:.2f}"})
             )
 
+            # ======================
+            # METRICS
+            # ======================
+
             c1, c2, c3 = st.columns(3)
 
-            c1.metric("Prophet MSE", f"{mse_prophet:.3f}")
-            c2.metric("Prophet R²", f"{r2_prophet:.3f}")
+            if mse_prophet is not None:
+
+                c1.metric("Prophet MSE", f"{mse_prophet:.3f}")
+                c2.metric("Prophet R²", f"{r2_prophet:.3f}")
+
+            else:
+
+                c1.metric("Prophet MSE", "Not enough aligned data")
+                c2.metric("Prophet R²", "Not enough aligned data")
+
             c3.metric("Evaluation", "Same dates as LSTM")
 
     # ====================== LSTM ======================
@@ -370,7 +390,13 @@ elif tab == "Predictions":
                 'Predicted': pred_vals
             })
 
-            fig = px.line(pred_df, x='Date', y='Predicted', title="LSTM Forecast")
+            fig = px.line(
+                pred_df,
+                x='Date',
+                y='Predicted',
+                title="LSTM Forecast"
+            )
+
             st.plotly_chart(fig, use_container_width=True)
 
             st.dataframe(
@@ -384,6 +410,7 @@ elif tab == "Predictions":
             c3.metric("Training Time", f"{training_time:.1f}s")
 
     else:
+
         st.error("Not enough data.")
 
 # ====================== SENTIMENT ======================
