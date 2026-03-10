@@ -200,62 +200,189 @@ if tab == "Data & Viz":
 
 # ====================== PREDICTIONS ======================
 elif tab == "Predictions":
+
     st.subheader("Price Forecast")
+
     model = st.selectbox("Model", ["Prophet", "LSTM"])
     days = st.slider("Days", 1, 30, 7)
-    if model == "Prophet" and len(data_main) >= 30:
+
+    # ====================== PROPHET ======================
+    if model == "Prophet" and len(data_main) >= 60:
+
         with st.spinner("Running Prophet..."):
-            df_p = data_main.reset_index()[['Date', 'Adj Close']].rename(columns={'Date': 'ds', 'Adj Close': 'y'})
-            m = Prophet()
-            m.fit(df_p)
-            future = m.make_future_dataframe(periods=days)
+
+            df_p = data_main.reset_index()[['Date', 'Adj Close']]
+            df_p.columns = ['ds', 'y']
+
+            train_frac = 0.8
+            train_size = int(len(df_p) * train_frac)
+
+            time_step = 60
+
+            df_train = df_p.iloc[:train_size]
+
+            m = Prophet(
+                daily_seasonality=False,
+                weekly_seasonality=True,
+                yearly_seasonality=True
+            )
+
+            m.fit(df_train)
+
+            future = m.make_future_dataframe(
+                periods=len(df_p) - train_size + days,
+                freq='B'
+            )
+
             forecast = m.predict(future)
-            pred = forecast[['ds', 'yhat']].tail(days)
-            pred.columns = ['Date', 'Predicted']
+
+            forecast_idx = forecast.set_index("ds")
+
+            # ======================
+            # ALIGN WITH LSTM TEST DATES
+            # ======================
+
+            lstm_test_dates = data_main.index[train_size + time_step:]
+
+            lstm_test_dates = [
+                pd.Timestamp(d)
+                for d in lstm_test_dates
+                if pd.Timestamp(d) in forecast_idx.index
+            ]
+
+            prophet_pred = forecast_idx.loc[lstm_test_dates]["yhat"].values
+            prophet_actual = data_main.loc[lstm_test_dates]["Adj Close"].values
+
+            mse_prophet = mean_squared_error(prophet_actual, prophet_pred)
+            r2_prophet = r2_score(prophet_actual, prophet_pred)
+
+            # ======================
+            # FUTURE FORECAST
+            # ======================
+
+            last_date = df_p['ds'].max()
+
+            future_pred = forecast[
+                forecast['ds'] > last_date
+            ][['ds', 'yhat']].head(days)
+
+            future_pred.columns = ['Date', 'Predicted']
+
             fig = plot_plotly(m, forecast)
             st.plotly_chart(fig, use_container_width=True)
-            st.dataframe(pred.style.format({"Predicted": "{:.2f}"}))
+
+            st.dataframe(
+                future_pred.style.format({"Predicted": "{:.2f}"})
+            )
+
+            c1, c2, c3 = st.columns(3)
+
+            c1.metric("Prophet MSE", f"{mse_prophet:.3f}")
+            c2.metric("Prophet R²", f"{r2_prophet:.3f}")
+            c3.metric("Evaluation", "Same dates as LSTM")
+
+    # ====================== LSTM ======================
     elif model == "LSTM" and len(data_main) >= 60:
+
         with st.spinner("Training LSTM..."):
+
             scaler = MinMaxScaler()
-            scaled = scaler.fit_transform(data_main['Adj Close'].values.reshape(-1,1))
+
+            scaled = scaler.fit_transform(
+                data_main['Adj Close'].values.reshape(-1, 1)
+            )
+
             train_size = int(len(scaled) * 0.8)
-            train, test = scaled[:train_size], scaled[train_size:]
+
+            train = scaled[:train_size]
+            test = scaled[train_size:]
+
+            time_step = 60
+
             def create_dataset(data, time_step=60):
-                X, y = [], []
+
+                X = []
+                y = []
+
                 for i in range(len(data) - time_step):
+
                     X.append(data[i:(i + time_step), 0])
                     y.append(data[i + time_step, 0])
+
                 return np.array(X), np.array(y)
-            X_train, y_train = create_dataset(train)
-            X_test, y_test = create_dataset(test)
+
+            X_train, y_train = create_dataset(train, time_step)
+            X_test, y_test = create_dataset(test, time_step)
+
             X_train = X_train.reshape(X_train.shape[0], X_train.shape[1], 1)
             X_test = X_test.reshape(X_test.shape[0], X_test.shape[1], 1)
+
             start_time = time.time()
-            lstm = Sequential([LSTM(50, return_sequences=True, input_shape=(60,1)), LSTM(50), Dense(1)])
-            lstm.compile('adam', 'mse')
-            lstm.fit(X_train, y_train, epochs=3, batch_size=32, verbose=0)
+
+            lstm = Sequential([
+                LSTM(50, return_sequences=True, input_shape=(60, 1)),
+                LSTM(50),
+                Dense(1)
+            ])
+
+            lstm.compile(optimizer='adam', loss='mse')
+
+            lstm.fit(
+                X_train,
+                y_train,
+                epochs=15,
+                batch_size=32,
+                verbose=0
+            )
+
             training_time = time.time() - start_time
+
             test_pred = lstm.predict(X_test, verbose=0)
+
             test_pred_inv = scaler.inverse_transform(test_pred)
-            y_test_inv = scaler.inverse_transform(y_test.reshape(-1,1))
+            y_test_inv = scaler.inverse_transform(y_test.reshape(-1, 1))
+
             mse = mean_squared_error(y_test_inv, test_pred_inv)
             r2 = r2_score(y_test_inv, test_pred_inv)
-            last = scaled[-60:].reshape(1,60,1)
+
+            last = scaled[-60:].reshape(1, 60, 1)
+
             preds = []
+
             for _ in range(days):
+
                 p = lstm.predict(last, verbose=0)[0][0]
+
                 preds.append(p)
-                last = np.append(last[:,1:,:], [[[p]]], axis=1)
-            pred_vals = scaler.inverse_transform(np.array(preds).reshape(-1,1)).flatten()
-            pred_df = pd.DataFrame({'Date': pd.date_range(start=data_main.index[-1]+pd.Timedelta(days=1), periods=days), 'Predicted': pred_vals})
+
+                last = np.append(last[:, 1:, :], [[[p]]], axis=1)
+
+            pred_vals = scaler.inverse_transform(
+                np.array(preds).reshape(-1, 1)
+            ).flatten()
+
+            pred_df = pd.DataFrame({
+                'Date': pd.date_range(
+                    start=data_main.index[-1] + pd.Timedelta(days=1),
+                    periods=days,
+                    freq='B'
+                ),
+                'Predicted': pred_vals
+            })
+
             fig = px.line(pred_df, x='Date', y='Predicted', title="LSTM Forecast")
             st.plotly_chart(fig, use_container_width=True)
-            st.dataframe(pred_df.style.format({"Predicted": "{:.2f}"}))
+
+            st.dataframe(
+                pred_df.style.format({"Predicted": "{:.2f}"})
+            )
+
             c1, c2, c3 = st.columns(3)
-            c1.metric("MSE", f"{mse:.3f}")
-            c2.metric("R²", f"{r2:.2f}")
+
+            c1.metric("LSTM MSE", f"{mse:.3f}")
+            c2.metric("LSTM R²", f"{r2:.3f}")
             c3.metric("Training Time", f"{training_time:.1f}s")
+
     else:
         st.error("Not enough data.")
 
