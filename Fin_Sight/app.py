@@ -208,9 +208,32 @@ elif tab == "Predictions":
             batch_size = st.selectbox("Batch size", [16, 32, 64], index=1)
             retrain = st.checkbox("Retrain model (force training now)", value=False)
         with col2:
-            st.markdown("**Model controls**")
-            st.caption("Model is cached per ticker. First run trains and caches; subsequent runs are instant.")
-            st.caption("Retrain forces a new cached model for the selected config.")
+            # --- Short user-facing model controls & how-to info ---
+            st.markdown("### Model Controls")
+            st.info(
+                """
+**How forecasting works**
+
+This section runs a **multi-feature LSTM deep learning model** to predict future stock prices.
+
+The model learns patterns from historical data using:
+
+• Adjusted Close price  
+• Trading Volume  
+• SMA20 (20-day moving average)  
+• SMA50 (50-day moving average)  
+• RSI (momentum indicator)
+
+**How to use**
+
+1. Select how many **future days** you want to forecast.  
+2. Adjust the **lookback window** (how many past days the model studies). Larger values let the model learn longer trends.  
+3. Increase **epochs** to train stronger (first run will take longer).  
+4. Use **Retrain model** only when you want to rebuild the model for the selected configuration.
+
+⚡ The model is **cached per stock + parameters**, so predictions are fast after the first run.
+                """
+            )
 
         # Feature engineering (SMA, RSI)
         df_feat = data_main.copy()
@@ -369,8 +392,7 @@ elif tab == "Predictions":
             inv_preds = model_artifacts['inv_preds']
             inv_actuals = model_artifacts['inv_actuals']
             history = model_artifacts['history']
-            training_time = model_artifacts['training_time']
-            training_duration_secs = model_artifacts['training_duration_secs']
+            # training_time and duration intentionally available in artifacts if you need them later
 
             # Compute metrics on backtest
             if inv_preds.size > 0:
@@ -379,27 +401,6 @@ elif tab == "Predictions":
             else:
                 mse = None
                 r2 = None
-
-            # -------- Model Info Panel --------
-            st.markdown("## Model Info")
-            model_info_col1, model_info_col2 = st.columns(2)
-            model_age = datetime.now() - training_time
-            # Determine "from cache" heuristic: if user didn't check retrain, treat as cached (cache key used)
-            from_cache = not retrain
-            with model_info_col1:
-                st.metric("Trained at", training_time.strftime("%Y-%m-%d %H:%M:%S"))
-                age_str = f"{model_age.days}d {model_age.seconds//3600}h {(model_age.seconds%3600)//60}m"
-                st.metric("Model age", age_str)
-                st.write(f"Cached: {'Yes' if from_cache else 'No (forced retrain)'}")
-                st.write(f"Training duration: {training_duration_secs:.1f}s")
-            with model_info_col2:
-                st.write("**Parameters**")
-                st.write(f"- Lookback window: {model_artifacts['time_step']} days")
-                st.write(f"- Epochs used: {model_artifacts['epochs']}")
-                st.write(f"- Batch size: {model_artifacts['batch_size']}")
-                st.write(f"- Features: {', '.join(model_artifacts['features'])}")
-                st.write(f"- Train samples: {model_artifacts['train_n']}")
-                st.write(f"- Test samples: {len(inv_preds)}")
 
             # -------- Model Performance Panel --------
             st.markdown("## Model Performance")
@@ -438,7 +439,10 @@ elif tab == "Predictions":
                     fig_bt.update_layout(title="Backtest: Actual vs Predicted", xaxis_title="Date", yaxis_title="Price")
                     st.plotly_chart(fig_bt, use_container_width=True)
                     # Show small metrics
-                    st.write(f"Backtest samples: {len(inv_preds)} — Test MSE: {mse:.3f} — Test R²: {r2:.3f}" if mse is not None else "No backtest samples.")
+                    if mse is not None:
+                        st.write(f"Backtest samples: {len(inv_preds)} — Test MSE: {mse:.3f} — Test R²: {r2:.3f}")
+                    else:
+                        st.write(f"Backtest samples: {len(inv_preds)}")
                 else:
                     st.info("Not enough backtest samples to plot predictions vs actual.")
 
