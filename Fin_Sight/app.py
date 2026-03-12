@@ -3,8 +3,8 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
-import plotly.express as px
 import plotly.graph_objects as go
+import plotly.express as px
 import nltk
 from nltk.sentiment.vader import SentimentIntensityAnalyzer
 import requests
@@ -22,9 +22,69 @@ nltk.download('vader_lexicon', quiet=True)
 sia = SentimentIntensityAnalyzer()
 current_date = datetime.now().date()
 st.set_page_config(page_title="FinSight", layout="wide")
+
+# ---------- Custom CSS (sidebar, model controls box, skeleton) ----------
+st.markdown("""
+<style>
+/* Sidebar styling: slightly narrower, cleaner */
+[data-testid="stSidebar"] > div:first-child {
+    background-color: #0b1220;  /* darker */
+    padding: 16px 12px;
+}
+[data-testid="stSidebar"] .css-1d391kg { /* labels */
+    color: #e6eef8;
+}
+
+/* Page container padding adjustments */
+.block-container {
+    padding-top: 0.6rem;
+    padding-bottom: 0.4rem;
+}
+
+/* Model Controls dark background */
+.model-box {
+    background-color: #000000;
+    padding: 18px;
+    border-radius: 12px;
+    border: 1px solid #111827;
+    font-size: 14px;
+    color: #e6eef8;
+}
+
+/* Compact model info */
+.compact-model-info {
+    font-size:12px;
+    color:#cbd5e1;
+    padding:8px 6px;
+}
+
+/* Skeleton placeholder cards */
+.skel-card {
+    background: linear-gradient(90deg, #111827 25%, #0b1220 50%, #111827 75%);
+    background-size: 200% 100%;
+    animation: shimmer 1.4s linear infinite;
+    height: 120px;
+    border-radius: 10px;
+    margin-bottom: 12px;
+}
+@keyframes shimmer {
+    0% { background-position: 200% 0; }
+    100% { background-position: -200% 0; }
+}
+
+/* Make the info panel's links and bullets match dark theme */
+.info-panel {
+    background: #062033;
+    padding: 14px;
+    border-radius: 10px;
+    color: #a8def0;
+}
+</style>
+""", unsafe_allow_html=True)
+
 st.title("**FinSight**: Real-Time Stock Intelligence")
 
-# ====================== FULL S&P 500 TICKERS (same list you provided) ======================
+# ====================== FULL S&P 500 TICKERS ======================
 tickers = [
     'A', 'AAPL', 'ABBV', 'ABNB', 'ABT', 'ACGL', 'ACN', 'ADBE', 'ADI', 'ADM', 'ADP', 'ADSK', 'AEE', 'AEP', 'AES',
     'AFL', 'AIG', 'AIZ', 'AJG', 'AKAM', 'ALB', 'ALGN', 'ALL', 'ALLE', 'AMAT', 'AMD', 'AME', 'AMGN', 'AMP', 'AMT',
@@ -208,31 +268,26 @@ elif tab == "Predictions":
             batch_size = st.selectbox("Batch size", [16, 32, 64], index=1)
             retrain = st.checkbox("Retrain model (force training now)", value=False)
         with col2:
-            # --- Short user-facing model controls & how-to info ---
-            st.markdown("### Model Controls")
-            st.info(
+            # --- Short user-facing model controls & how-to info (black background) ---
+            st.markdown(
                 """
-**How forecasting works**
-
-This section runs a **multi-feature LSTM deep learning model** to predict future stock prices.
-
-The model learns patterns from historical data using:
-
-• Adjusted Close price  
-• Trading Volume  
-• SMA20 (20-day moving average)  
-• SMA50 (50-day moving average)  
-• RSI (momentum indicator)
-
-**How to use**
-
-1. Select how many **future days** you want to forecast.  
-2. Adjust the **lookback window** (how many past days the model studies). Larger values let the model learn longer trends.  
-3. Increase **epochs** to train stronger (first run will take longer).  
-4. Use **Retrain model** only when you want to rebuild the model for the selected configuration.
-
-⚡ The model is **cached per stock + parameters**, so predictions are fast after the first run.
-                """
+                <div class="model-box">
+                <b>Model Controls</b><br><br>
+                <b>How forecasting works</b><br>
+                • Adjusted Close price<br>
+                • Trading Volume<br>
+                • SMA20 (20-day moving average)<br>
+                • SMA50 (50-day moving average)<br>
+                • RSI (momentum indicator)<br><br>
+                <b>How to use</b><br>
+                1. Select how many future days you want to forecast.<br>
+                2. Adjust the lookback window (how many past days the model studies).<br>
+                3. Increase epochs to train stronger (first run takes longer).<br>
+                4. Use retrain only when rebuilding the model.<br><br>
+                ⚡ Model is cached per stock + params so predictions are fast after first run.
+                </div>
+                """,
+                unsafe_allow_html=True
             )
 
         # Feature engineering (SMA, RSI)
@@ -376,13 +431,26 @@ The model learns patterns from historical data using:
             start_str = str(start_date)
             end_str = str(end_date)
 
-            # Train / load cached model
+            # ---- Show skeleton placeholders while model trains/loads ----
+            # We create visual placeholders (skeletons) so users see a loading UI instead of the default spinner.
+            placeholder_box = st.empty()
+            placeholder_plots = st.empty()
+
+            with placeholder_box.container():
+                st.markdown('<div class="skel-card"></div>', unsafe_allow_html=True)
+                st.markdown('<div class="skel-card"></div>', unsafe_allow_html=True)
+
+            # Train / load cached model (this happens synchronously; skeleton visible during call)
             cache_msg = "Loading model (cached)..." if not retrain else "Retraining model (forced)..."
-            with st.spinner(cache_msg):
+            try:
                 model_artifacts = train_and_cache_model(
                     selected_ticker, start_str, end_str,
                     time_step, epochs, batch_size, retrain
                 )
+            finally:
+                # remove skeleton immediately after training finishes/loads
+                placeholder_box.empty()
+                placeholder_plots.empty()
 
             # Extract artifacts
             model = model_artifacts['model']
@@ -399,23 +467,24 @@ The model learns patterns from historical data using:
             if inv_preds.size > 0:
                 mse = mean_squared_error(inv_actuals, inv_preds)
                 r2 = r2_score(inv_actuals, inv_preds)
+                # residuals to estimate forecast uncertainty
+                residuals = (inv_actuals - inv_preds)
+                resid_std = float(np.std(residuals)) if residuals.size > 1 else float(np.std(df_used['Adj Close'].pct_change().dropna())) * df_used['Adj Close'].iloc[-1]
             else:
                 mse = None
                 r2 = None
+                resid_std = float(np.std(df_used['Adj Close'].pct_change().dropna())) * df_used['Adj Close'].iloc[-1]
 
             # ---------- Compact Model Info (small font) ----------
-            # Add subtle small-font model details (reintroduced per request)
             try:
                 if training_time is not None:
                     model_age = datetime.now() - training_time
                     age_str = f"{model_age.days}d {model_age.seconds//3600}h {(model_age.seconds%3600)//60}m"
                     cached_flag = "Yes" if not retrain else "No (forced retrain)"
                     info_html = f"""
-                    <div style="font-size:12px;color:#cbd5e1;padding:8px;border-radius:8px;background:transparent;">
-                        <strong style="font-size:13px;color:#ffffff;">Model Info (compact)</strong><br/>
-                        Trained at: {training_time.strftime("%Y-%m-%d %H:%M:%S")}<br/>
-                        Model age: {age_str}<br/>
-                        Cached: {cached_flag}<br/>
+                    <div class="compact-model-info">
+                        <strong>Model Info (compact)</strong><br/>
+                        Trained at: {training_time.strftime("%Y-%m-%d %H:%M:%S")} — Model age: {age_str} — Cached: {cached_flag}<br/>
                         Lookback: {model_artifacts['time_step']} days — Epochs: {model_artifacts['epochs']} — Batch: {model_artifacts['batch_size']}<br/>
                         Features: {', '.join(model_artifacts['features'])}
                     </div>
@@ -426,7 +495,6 @@ The model learns patterns from historical data using:
 
             # -------- Model Performance Panel --------
             st.markdown("## Model Performance")
-
             perf_col1, perf_col2 = st.columns([1, 1])
 
             # Loss curves
@@ -447,7 +515,6 @@ The model learns patterns from historical data using:
             with perf_col2:
                 st.write("### Backtest: Predictions vs Actual")
                 if len(inv_preds) > 0:
-                    # compute dates for backtest: indices correspond to df_used index at pos (time_step + train_n ..)
                     backtest_start_idx = model_artifacts['time_step'] + model_artifacts['train_n']
                     backtest_indices = df_used.index[backtest_start_idx: backtest_start_idx + len(inv_preds)]
                     df_backtest = pd.DataFrame({
@@ -456,20 +523,18 @@ The model learns patterns from historical data using:
                         'Predicted': inv_preds
                     }).set_index('Date')
                     fig_bt = go.Figure()
-                    fig_bt.add_trace(go.Scatter(x=df_backtest.index, y=df_backtest['Actual'], name='Actual'))
-                    fig_bt.add_trace(go.Scatter(x=df_backtest.index, y=df_backtest['Predicted'], name='Predicted'))
+                    fig_bt.add_trace(go.Scatter(x=df_backtest.index, y=df_backtest['Actual'], name='Actual', line=dict(color='#1f77b4')))
+                    fig_bt.add_trace(go.Scatter(x=df_backtest.index, y=df_backtest['Predicted'], name='Predicted', line=dict(color='#ff7f0e')))
                     fig_bt.update_layout(title="Backtest: Actual vs Predicted", xaxis_title="Date", yaxis_title="Price")
                     st.plotly_chart(fig_bt, use_container_width=True)
-                    # Show small metrics
                     if mse is not None:
                         st.write(f"Backtest samples: {len(inv_preds)} — Test MSE: {mse:.3f} — Test R²: {r2:.3f}")
-                    else:
-                        st.write(f"Backtest samples: {len(inv_preds)}")
                 else:
                     st.info("Not enough backtest samples to plot predictions vs actual.")
 
-            # -------- Future Forecast (recursive multi-step) --------
+            # -------- Future Forecast (recursive multi-step) with confidence band and animation --------
             st.markdown("## Forecast (future days)")
+
             # Build seed recent data from df_used last time_step rows
             recent = df_used.iloc[-time_step:].copy()
             recent_adj = recent['Adj Close'].tolist()
@@ -504,11 +569,73 @@ The model learns patterns from historical data using:
                 recent_adj.append(pred_price)
                 recent_vol.append(vol_local)
 
+            # compute confidence band: use resid_std (estimate) -> 95% CI
+            z = 1.96
+            band_uppers = [p + z * resid_std for p in future_preds]
+            band_lowers = [p - z * resid_std for p in future_preds]
+
             future_dates = pd.date_range(start=data_main.index[-1] + pd.Timedelta(days=1), periods=days, freq='B')
-            future_df = pd.DataFrame({'Date': future_dates, 'Predicted': future_preds})
-            fig = px.line(future_df, x='Date', y='Predicted', title=f"{selected_ticker} — LSTM Forecast ({len(future_preds)} days)")
+            future_df = pd.DataFrame({'Date': future_dates, 'Predicted': future_preds, 'Upper': band_uppers, 'Lower': band_lowers})
+            # Animated plot creation using Plotly frames
+            # Historical trace
+            hist_x = df_used.index
+            hist_y = df_used['Adj Close'].values
+
+            # base figure with historical line and an initial tiny predicted point
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(x=hist_x, y=hist_y, name='Historical', line=dict(color='#1f77b4')))
+            # initial predicted (none)
+            fig.add_trace(go.Scatter(x=[future_dates[0]], y=[future_preds[0]], name='Predicted', line=dict(color='#ff7f0e')))
+            # initial band (fill)
+            fig.add_trace(go.Scatter(x=[future_dates[0], future_dates[0]], y=[band_lowers[0], band_uppers[0]],
+                                     fill='toself', fillcolor='rgba(255,127,14,0.15)', line=dict(color='rgba(255,127,14,0)'), showlegend=True, name='95% CI'))
+
+            # frames: progressively reveal predicted points and the band
+            frames = []
+            for i in range(len(future_dates)):
+                x_pred = future_dates[:i+1]
+                y_pred = future_preds[:i+1]
+                x_band = list(future_dates[:i+1]) + list(future_dates[:i+1][::-1])
+                y_band = list(band_uppers[:i+1]) + list(band_lowers[:i+1][::-1])
+                frame = go.Frame(data=[
+                    go.Scatter(x=hist_x, y=hist_y),
+                    go.Scatter(x=x_pred, y=y_pred, line=dict(color='#ff7f0e')),
+                    go.Scatter(x=x_band, y=y_band, fill='toself', fillcolor='rgba(255,127,14,0.15)', line=dict(color='rgba(255,127,14,0)'))
+                ], name=str(i))
+                frames.append(frame)
+            fig.frames = frames
+
+            # layout: play button
+            fig.update_layout(
+                title=f"{selected_ticker} — Forecast (with 95% CI)",
+                xaxis_title="Date",
+                yaxis_title="Price",
+                updatemenus=[{
+                    "type": "buttons",
+                    "buttons": [
+                        {
+                            "label": "Play",
+                            "method": "animate",
+                            "args": [None, {"frame": {"duration": 400, "redraw": True}, "fromcurrent": True, "transition": {"duration": 200}}]
+                        },
+                        {
+                            "label": "Pause",
+                            "method": "animate",
+                            "args": [[None], {"frame": {"duration": 0, "redraw": False}, "mode": "immediate", "transition": {"duration": 0}}]
+                        }
+                    ],
+                    "direction": "left",
+                    "pad": {"r": 10, "t": 10},
+                    "showactive": True,
+                    "x": 0.01,
+                    "y": -0.12,
+                    "xanchor": "left",
+                    "yanchor": "top"
+                }]
+            )
+
             st.plotly_chart(fig, use_container_width=True)
-            st.dataframe(future_df.style.format({"Predicted": "{:.2f}"}), use_container_width=True)
+            st.dataframe(future_df.style.format({"Predicted": "{:.2f}", "Upper": "{:.2f}", "Lower": "{:.2f}"}), use_container_width=True)
 
             # final metrics display
             c1, c2, c3 = st.columns(3)
