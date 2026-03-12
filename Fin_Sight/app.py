@@ -392,7 +392,8 @@ The model learns patterns from historical data using:
             inv_preds = model_artifacts['inv_preds']
             inv_actuals = model_artifacts['inv_actuals']
             history = model_artifacts['history']
-            # training_time and duration intentionally available in artifacts if you need them later
+            training_time = model_artifacts.get('training_time', None)
+            training_duration_secs = model_artifacts.get('training_duration_secs', None)
 
             # Compute metrics on backtest
             if inv_preds.size > 0:
@@ -401,6 +402,27 @@ The model learns patterns from historical data using:
             else:
                 mse = None
                 r2 = None
+
+            # ---------- Compact Model Info (small font) ----------
+            # Add subtle small-font model details (reintroduced per request)
+            try:
+                if training_time is not None:
+                    model_age = datetime.now() - training_time
+                    age_str = f"{model_age.days}d {model_age.seconds//3600}h {(model_age.seconds%3600)//60}m"
+                    cached_flag = "Yes" if not retrain else "No (forced retrain)"
+                    info_html = f"""
+                    <div style="font-size:12px;color:#cbd5e1;padding:8px;border-radius:8px;background:transparent;">
+                        <strong style="font-size:13px;color:#ffffff;">Model Info (compact)</strong><br/>
+                        Trained at: {training_time.strftime("%Y-%m-%d %H:%M:%S")}<br/>
+                        Model age: {age_str}<br/>
+                        Cached: {cached_flag}<br/>
+                        Lookback: {model_artifacts['time_step']} days — Epochs: {model_artifacts['epochs']} — Batch: {model_artifacts['batch_size']}<br/>
+                        Features: {', '.join(model_artifacts['features'])}
+                    </div>
+                    """
+                    st.markdown(info_html, unsafe_allow_html=True)
+            except Exception:
+                pass
 
             # -------- Model Performance Panel --------
             st.markdown("## Model Performance")
