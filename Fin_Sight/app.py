@@ -678,102 +678,24 @@ elif tab == "Predictions":
                 c2.metric("Test R²", "N/A")
             c3.metric("Model", "Multi-feature LSTM (cached)")
 
-# ====================== SENTIMENT (YAHOO FINANCE ONLY) ======================
+# ====================== SENTIMENT ======================
 elif tab == "Sentiment":
     st.subheader("News Sentiment")
-
-    # Build a DataFrame of headlines + scores + dates (from Yahoo-only fetch)
-    df_news = pd.DataFrame({
-        "headline": news_posts,
-        "link": news_links,
-        "published": news_dates,
-        "score": vader_scores
-    })
-
-    # If only the fallback "Market quiet." show info
-    if len(df_news) == 0 or (len(df_news) == 1 and str(df_news['headline'].iloc[0]).lower().startswith("market")):
-        st.info("No news available from Yahoo Finance for this ticker.")
+    if news_posts:
+        df = pd.DataFrame({'News': news_posts, 'Link': news_links, 'Score': vader_scores})
+        def color(val):
+            return f"color: {'green' if val > 0.1 else 'red' if val < -0.1 else 'gray'}"
+        st.dataframe(df.style.applymap(color, subset=['Score']).format({'Score': '{:.3f}'}), use_container_width=True)
+        pos = sum(1 for s in vader_scores if s > 0.1)
+        neg = sum(1 for s in vader_scores if s < -0.1)
+        neu = len(vader_scores) - pos - neg
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Positive", pos)
+        c2.metric("Negative", neg)
+        c3.metric("Neutral", neu)
     else:
-        # Gauge (avg score)
-        avg_score = float(np.mean(df_news['score']))
-        # create gauge figure in range [-1,1]
-        gauge = go.Figure(go.Indicator(
-            mode="gauge+number",
-            value=avg_score,
-            gauge={'axis': {'range': [-1, 1]},
-                   'bar': {'color': "#ff7f0e"},
-                   'steps': [
-                       {'range': [-1, -0.05], 'color': "#b21f2d"},
-                       {'range': [-0.05, 0.05], 'color': "#6b7280"},
-                       {'range': [0.05, 1], 'color': "#16a34a"}
-                   ]},
-            title={'text': "Average Sentiment (VADER)"},
-            number={'valueformat': ".3f"}
-        ))
-        # indicator verdict
-        if avg_score > 0.05:
-            verdict = "Bullish 🔺"
-        elif avg_score < -0.05:
-            verdict = "Bearish 🔻"
-        else:
-            verdict = "Neutral ➖"
+        st.info("No news available.")
 
-        colg1, colg2 = st.columns([1, 2])
-        with colg1:
-            st.plotly_chart(gauge, use_container_width=True)
-            st.markdown(f"**Overall**: {verdict}")
-        with colg2:
-            # Sentiment trend: group by date if available
-            df_trend = df_news.copy()
-            # fill missing published with today's date
-            df_trend['published'] = df_trend['published'].apply(lambda x: pd.to_datetime(x).date() if (not pd.isna(x) and x is not None) else pd.to_datetime(datetime.now()).date())
-            trend = df_trend.groupby('published')['score'].mean().reset_index()
-            trend['published'] = pd.to_datetime(trend['published'])
-            fig_trend = px.line(trend, x='published', y='score', markers=True, title="Sentiment trend (daily avg)")
-            fig_trend.update_yaxes(range=[-1, 1])
-            st.plotly_chart(fig_trend, use_container_width=True)
-
-        # AI-like summary (simple extractive template)
-        pos_count = sum(1 for s in df_news['score'] if s > 0.1)
-        neg_count = sum(1 for s in df_news['score'] if s < -0.1)
-        neu_count = len(df_news) - pos_count - neg_count
-
-        # top headlines
-        top_pos = df_news.sort_values('score', ascending=False).head(3)
-        top_neg = df_news.sort_values('score', ascending=True).head(3)
-
-        summary_lines = []
-        summary_lines.append(f"Summary (auto): The recent {len(df_news)} Yahoo headlines show **{pos_count}** positive, **{neg_count}** negative and **{neu_count}** neutral signals. Overall tone is **{verdict.split()[0]}**.")
-        if len(top_pos) > 0:
-            summary_lines.append("Top positive snippets: " + " ; ".join([h for h in top_pos['headline'].tolist()]))
-        if len(top_neg) > 0:
-            summary_lines.append("Top negative snippets: " + " ; ".join([h for h in top_neg['headline'].tolist()]))
-
-        st.markdown("### Auto News Summary (Yahoo)")
-        st.info("\n\n".join(summary_lines))
-
-        # show table
-        def color_score(val):
-            if val > 0.1:
-                return "color: green"
-            elif val < -0.1:
-                return "color: red"
-            else:
-                return "color: gray"
-
-        st.dataframe(df_news[['headline', 'published', 'score', 'link']].rename(columns={'headline':'Headline','published':'Date','score':'Score','link':'Link'}).style.applymap(color_score, subset=['Score']).format({"Score":"{:.3f}"}), use_container_width=True)
-
-        # expanders for top positive/negative
-        with st.expander("Top positive headlines"):
-            for _, row in top_pos.iterrows():
-                st.write(f"- {row['headline']} ({row['score']:+.3f})")
-                if row['link'] and row['link'] != "#":
-                    st.caption(row['link'])
-        with st.expander("Top negative headlines"):
-            for _, row in top_neg.iterrows():
-                st.write(f"- {row['headline']} ({row['score']:+.3f})")
-                if row['link'] and row['link'] != "#":
-                    st.caption(row['link'])
 
 # ====================== COMPARISON ======================
 elif tab == "Comparison":
