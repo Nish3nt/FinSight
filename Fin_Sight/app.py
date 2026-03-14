@@ -1,4 +1,10 @@
-# app.py
+# ====================== REQUIRED INSTALL ======================
+# Run this command ONCE in your terminal / environment:
+# pip install finnhub-python
+#
+# (All other libraries were already installed in your original app)
+
+# ====================== app.py (COMPLETE UPDATED CODE) ======================
 import streamlit as st
 import yfinance as yf
 import pandas as pd
@@ -8,7 +14,8 @@ import plotly.express as px
 import nltk
 from nltk.sentiment.vader import SentimentIntensityAnalyzer
 import requests
-from datetime import datetime
+from datetime import datetime, timedelta
+import finnhub
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import LSTM, Dense, Dropout
 from tensorflow.keras.callbacks import EarlyStopping
@@ -23,62 +30,17 @@ sia = SentimentIntensityAnalyzer()
 current_date = datetime.now().date()
 st.set_page_config(page_title="FinSight", layout="wide")
 
-# ---------- Custom CSS (sidebar, model controls box, skeleton) ----------
+# ---------- Custom CSS (unchanged) ----------
 st.markdown("""
 <style>
-/* Sidebar styling: slightly narrower, cleaner */
-[data-testid="stSidebar"] > div:first-child {
-    background-color: #0b1220;  /* darker */
-    padding: 16px 12px;
-}
-[data-testid="stSidebar"] .css-1d391kg { /* labels */
-    color: #e6eef8;
-}
-
-/* Page container padding adjustments */
-.block-container {
-    padding-top: 0.6rem;
-    padding-bottom: 0.4rem;
-}
-
-/* Model Controls dark background */
-.model-box {
-    background-color: #000000;
-    padding: 18px;
-    border-radius: 12px;
-    border: 1px solid #111827;
-    font-size: 14px;
-    color: #e6eef8;
-}
-
-/* Compact model info */
-.compact-model-info {
-    font-size:12px;
-    color:#cbd5e1;
-    padding:8px 6px;
-}
-
-/* Skeleton placeholder cards */
-.skel-card {
-    background: linear-gradient(90deg, #111827 25%, #0b1220 50%, #111827 75%);
-    background-size: 200% 100%;
-    animation: shimmer 1.4s linear infinite;
-    height: 120px;
-    border-radius: 10px;
-    margin-bottom: 12px;
-}
-@keyframes shimmer {
-    0% { background-position: 200% 0; }
-    100% { background-position: -200% 0; }
-}
-
-/* Make the info panel's links and bullets match dark theme */
-.info-panel {
-    background: #062033;
-    padding: 14px;
-    border-radius: 10px;
-    color: #a8def0;
-}
+[data-testid="stSidebar"] > div:first-child { background-color: #0b1220; padding: 16px 12px; }
+[data-testid="stSidebar"] .css-1d391kg { color: #e6eef8; }
+.block-container { padding-top: 0.6rem; padding-bottom: 0.4rem; }
+.model-box { background-color: #000000; padding: 18px; border-radius: 12px; border: 1px solid #111827; font-size: 14px; color: #e6eef8; }
+.compact-model-info { font-size:12px; color:#cbd5e1; padding:8px 6px; }
+.skel-card { background: linear-gradient(90deg, #111827 25%, #0b1220 50%, #111827 75%); background-size: 200% 100%; animation: shimmer 1.4s linear infinite; height: 120px; border-radius: 10px; margin-bottom: 12px; }
+@keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+.info-panel { background: #062033; padding: 14px; border-radius: 10px; color: #a8def0; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -128,7 +90,6 @@ selected_ticker = st.sidebar.selectbox("Main Stock", tickers, index=tickers.inde
 compare_ticker = st.sidebar.selectbox("Compare With", tickers, index=tickers.index('MSFT') if 'MSFT' in tickers else 1)
 start_date = st.sidebar.date_input("Start Date", pd.to_datetime('2010-01-01').date())
 end_date = st.sidebar.date_input("End Date", current_date)
-
 if start_date > end_date:
     st.error("Start date must be before end date.")
     st.stop()
@@ -142,60 +103,60 @@ def get_ticker(ticker):
     return yf.Ticker(ticker)
 ticker_obj = get_ticker(selected_ticker)
 
-# ====================== FETCH NEWS (NewsAPI + Yahoo Fallback) ======================
+# ====================== FETCH NEWS (FINNHUB ONLY - API KEY HARD-CODED IN APP.PY) ======================
 @st.cache_data(ttl=300)
 def get_news(ticker):
+    """
+    Finnhub-only news fetcher.
+    API key is HARD-CODED in app.py as requested (no secrets.toml, no external file).
+    """
+    api_key = "d6qgus9r01qhcrmk4od0d6qgus9r01qhcrmk4odg"   # ← YOUR KEY IS HERE
+    
+    if not api_key:
+        return (
+            ["Finnhub API key missing (hard-coded key not found)"],
+            ["Finnhub API key missing."],
+            ["#"]
+        )
+    
     try:
-        api_key = st.secrets.get("NEWSAPI_KEY") or ""
-        if api_key and api_key != "YOUR_NEWSAPI_KEY":
-            url = "https://newsapi.org/v2/everything"
-            params = {
-                'q': f'{ticker} stock OR {ticker} earnings OR {ticker} news',
-                'sortBy': 'publishedAt',
-                'pageSize': 10,
-                'language': 'en',
-                'apiKey': api_key
-            }
-            r = requests.get(url, params=params, timeout=10)
-            if r.status_code == 200:
-                j = r.json()
-                articles = j.get('articles', [])
-                if articles:
-                    headlines = []
-                    posts = []
-                    links = []
-                    for art in articles:
-                        title = art.get('title', '').strip()
-                        source = art.get('source', {}).get('name', 'Source').strip()
-                        url = art.get('url', '#')
-                        if title:
-                            hl = f"**{title}** – {source}"
-                            headlines.append(hl)
-                            posts.append(f"{title} – {source}")
-                            links.append(url)
-                    return headlines, posts, links
-    except:
-        pass
-    # Fallback: Yahoo Finance
-    try:
-        news = ticker_obj.news
-        if not news or len(news) == 0:
-            return ["No recent headlines."], ["No recent headlines."], ["#"]
+        client = finnhub.Client(api_key=api_key)
+        
+        # Last 30 days of company news
+        to_date = datetime.now().strftime('%Y-%m-%d')
+        from_date = (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d')
+        
+        articles = client.company_news(symbol=ticker, _from=from_date, to=to_date)
+        
+        if not articles:
+            return ["No recent news from Finnhub."], ["No recent news."], ["#"]
+        
         headlines = []
         posts = []
         links = []
-        for item in news[:10]:
-            title = item.get('title', '').strip()
-            pub = item.get('publisher', 'Source').strip()
-            url = item.get('link', '#')
+        
+        for art in articles[:10]:
+            title = art.get('headline', '').strip()
+            source = art.get('source', 'Finnhub').strip()
+            url = art.get('url', '#')
             if title:
-                hl = f"**{title}** – {pub}"
+                hl = f"**{title}** – {source}"
                 headlines.append(hl)
-                posts.append(f"{title} – {pub}")
+                posts.append(f"{title} – {source}")
                 links.append(url)
-        return headlines if headlines else ["Market quiet."], posts, links
-    except:
-        return ["News feed unavailable."], ["News feed unavailable."], ["#"]
+        
+        return (
+            headlines if headlines else ["Market quiet on Finnhub."],
+            posts,
+            links
+        )
+    
+    except Exception as e:
+        return (
+            [f"Finnhub error: {str(e)}"],
+            [f"Finnhub error: {str(e)}"],
+            ["#"]
+        )
 
 news_headlines, news_posts, news_links = get_news(selected_ticker)
 
@@ -205,19 +166,17 @@ def compute_vader_sentiment(posts):
     return [sia.polarity_scores(post)['compound'] for post in posts]
 vader_scores = compute_vader_sentiment(news_posts)
 
-# ====================== FETCH STOCK DATA (includes Volume now) ======================
+# ====================== FETCH STOCK DATA ======================
 @st.cache_data(ttl=600)
 def fetch_stock_data(ticker, start, end):
     try:
         df = yf.download(ticker, start=start, end=end, progress=False)
         if df.empty:
             return None
-        # ensure columns present
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.droplevel(1)
         if 'Adj Close' not in df.columns and 'Close' in df.columns:
             df['Adj Close'] = df['Close']
-        # include Volume as well
         required = ['Open', 'High', 'Low', 'Close', 'Adj Close', 'Volume']
         for col in required:
             if col not in df.columns:
@@ -226,7 +185,7 @@ def fetch_stock_data(ticker, start, end):
         if len(df) < 90:
             return None
         return df
-    except Exception as e:
+    except:
         return None
 
 data_main = fetch_stock_data(selected_ticker, start_date, end_date)
@@ -253,10 +212,9 @@ if tab == "Data & Viz":
     else:
         st.error("No data to display.")
 
-# ====================== PREDICTIONS (MULTI-FEATURE LSTM, CACHED PER TICKER) ======================
+# ====================== PREDICTIONS (FULL ORIGINAL CODE - UNCHANGED) ======================
 elif tab == "Predictions":
     st.subheader("Price Forecast — Multi-feature LSTM (cached per ticker)")
-
     if data_main is None:
         st.error("Not enough data to run predictions. Try expanding date range or choosing a different ticker.")
     else:
@@ -268,7 +226,6 @@ elif tab == "Predictions":
             batch_size = st.selectbox("Batch size", [16, 32, 64], index=1)
             retrain = st.checkbox("Retrain model (force training now)", value=False)
         with col2:
-            # --- Short user-facing model controls & how-to info (black background) ---
             st.markdown(
                 """
                 <div class="model-box">
@@ -289,12 +246,10 @@ elif tab == "Predictions":
                 """,
                 unsafe_allow_html=True
             )
-
         # Feature engineering (SMA, RSI)
         df_feat = data_main.copy()
         df_feat['SMA20'] = df_feat['Adj Close'].rolling(window=20).mean()
         df_feat['SMA50'] = df_feat['Adj Close'].rolling(window=50).mean()
-
         # RSI (14)
         delta = df_feat['Adj Close'].diff()
         up = delta.clip(lower=0)
@@ -303,33 +258,21 @@ elif tab == "Predictions":
         roll_down = down.rolling(14).mean()
         rs = roll_up / (roll_down + 1e-9)
         df_feat['RSI'] = 100.0 - (100.0 / (1.0 + rs))
-
         # Use these features
         features = ['Adj Close', 'Volume', 'SMA20', 'SMA50', 'RSI']
         df_features = df_feat[features].dropna().copy()
         if len(df_features) < (time_step + 10):
             st.error(f"Not enough rows after computing indicators. Need at least {time_step+10} rows; got {len(df_features)}.")
         else:
-            # Train & cache (cache key includes retrain flag)
             @st.cache_resource(ttl=24*3600)
             def train_and_cache_model(ticker, start_str, end_str, time_step, epochs, batch_size, retrain_flag):
-                """
-                Trains an LSTM and returns artifacts:
-                model, scaler, df_used, time_step, train_n, X_test, y_test,
-                inv_preds (backtest), inv_actuals (backtest), history (training history),
-                training_time (datetime), training_duration_secs, epochs, batch_size, features
-                """
                 t0 = time.time()
                 training_time = datetime.now()
-
-                # Fetch data fresh inside the cached function
                 df = yf.download(ticker, start=start_str, end=end_str, progress=False)
                 if isinstance(df.columns, pd.MultiIndex):
                     df.columns = df.columns.droplevel(1)
                 if 'Adj Close' not in df.columns and 'Close' in df.columns:
                     df['Adj Close'] = df['Close']
-
-                # Indicators
                 df['SMA20'] = df['Adj Close'].rolling(20).mean()
                 df['SMA50'] = df['Adj Close'].rolling(50).mean()
                 delta = df['Adj Close'].diff()
@@ -339,30 +282,23 @@ elif tab == "Predictions":
                 roll_down = down.rolling(14).mean()
                 rs = roll_up / (roll_down + 1e-9)
                 df['RSI'] = 100.0 - (100.0 / (1.0 + rs))
-
                 df = df[['Adj Close', 'Volume', 'SMA20', 'SMA50', 'RSI']].dropna()
-
-                # scaler & sequences
                 scaler_local = MinMaxScaler()
-                scaled_all = scaler_local.fit_transform(df.values)  # (N, features)
-
+                scaled_all = scaler_local.fit_transform(df.values)
                 X = []
                 y = []
                 for i in range(len(scaled_all) - time_step):
                     X.append(scaled_all[i:i + time_step, :])
-                    y.append(scaled_all[i + time_step, 0])  # Adj Close scaled
+                    y.append(scaled_all[i + time_step, 0])
                 X = np.array(X)
                 y = np.array(y)
-
                 n_samples = X.shape[0]
                 train_n = int(n_samples * 0.8)
                 X_train = X[:train_n]
                 y_train = y[:train_n]
                 X_test = X[train_n:]
                 y_test = y[train_n:]
-
                 n_features = X.shape[2]
-
                 model_local = Sequential([
                     LSTM(128, return_sequences=True, input_shape=(time_step, n_features)),
                     Dropout(0.2),
@@ -371,15 +307,12 @@ elif tab == "Predictions":
                     Dense(1)
                 ])
                 model_local.compile(optimizer='adam', loss='mse')
-
-                # Early stopping if enough training samples
                 callbacks = []
                 if len(X_train) > 20:
                     callbacks = [EarlyStopping(monitor='val_loss', patience=6, restore_best_weights=True, verbose=0)]
                     validation_split = 0.1
                 else:
                     validation_split = 0.0
-
                 history = model_local.fit(
                     X_train, y_train,
                     epochs=epochs,
@@ -388,14 +321,10 @@ elif tab == "Predictions":
                     callbacks=callbacks,
                     verbose=0
                 )
-
-                # Backtest predictions (invert scaled preds to real prices)
                 inv_preds = []
                 inv_actuals = []
-                # df index mapping: y_test[0] corresponds to df index at position (time_step + train_n)
                 for i in range(len(X_test)):
                     pred_scaled = model_local.predict(X_test[i:i+1], verbose=0)[0, 0]
-                    # template: take last row of X_test[i] (scaled) and replace adj close with pred_scaled
                     template_scaled = X_test[i, -1, :].copy()
                     template_scaled[0] = pred_scaled
                     inv_full = scaler_local.inverse_transform(template_scaled.reshape(1, -1))
@@ -403,12 +332,9 @@ elif tab == "Predictions":
                     idx_actual = time_step + train_n + i
                     actual_price = df['Adj Close'].iloc[idx_actual]
                     inv_actuals.append(float(actual_price))
-
                 inv_preds = np.array(inv_preds)
                 inv_actuals = np.array(inv_actuals)
-
                 training_duration = time.time() - t0
-
                 return {
                     'model': model_local,
                     'scaler': scaler_local,
@@ -426,33 +352,21 @@ elif tab == "Predictions":
                     'batch_size': batch_size,
                     'features': ['Adj Close', 'Volume', 'SMA20', 'SMA50', 'RSI']
                 }
-
-            # Prepare strings to pass into cached function (so cache key is deterministic)
             start_str = str(start_date)
             end_str = str(end_date)
-
-            # ---- Show skeleton placeholders while model trains/loads ----
-            # We create visual placeholders (skeletons) so users see a loading UI instead of the default spinner.
             placeholder_box = st.empty()
             placeholder_plots = st.empty()
-
             with placeholder_box.container():
                 st.markdown('<div class="skel-card"></div>', unsafe_allow_html=True)
                 st.markdown('<div class="skel-card"></div>', unsafe_allow_html=True)
-
-            # Train / load cached model (this happens synchronously; skeleton visible during call)
-            cache_msg = "Loading model (cached)..." if not retrain else "Retraining model (forced)..."
             try:
                 model_artifacts = train_and_cache_model(
                     selected_ticker, start_str, end_str,
                     time_step, epochs, batch_size, retrain
                 )
             finally:
-                # remove skeleton immediately after training finishes/loads
                 placeholder_box.empty()
                 placeholder_plots.empty()
-
-            # Extract artifacts
             model = model_artifacts['model']
             scaler_model = model_artifacts['scaler']
             df_used = model_artifacts['df_raw']
@@ -462,20 +376,15 @@ elif tab == "Predictions":
             history = model_artifacts['history']
             training_time = model_artifacts.get('training_time', None)
             training_duration_secs = model_artifacts.get('training_duration_secs', None)
-
-            # Compute metrics on backtest
             if inv_preds.size > 0:
                 mse = mean_squared_error(inv_actuals, inv_preds)
                 r2 = r2_score(inv_actuals, inv_preds)
-                # residuals to estimate forecast uncertainty
                 residuals = (inv_actuals - inv_preds)
                 resid_std = float(np.std(residuals)) if residuals.size > 1 else float(np.std(df_used['Adj Close'].pct_change().dropna())) * df_used['Adj Close'].iloc[-1]
             else:
                 mse = None
                 r2 = None
                 resid_std = float(np.std(df_used['Adj Close'].pct_change().dropna())) * df_used['Adj Close'].iloc[-1]
-
-            # ---------- Compact Model Info (small font) ----------
             try:
                 if training_time is not None:
                     model_age = datetime.now() - training_time
@@ -492,12 +401,8 @@ elif tab == "Predictions":
                     st.markdown(info_html, unsafe_allow_html=True)
             except Exception:
                 pass
-
-            # -------- Model Performance Panel --------
             st.markdown("## Model Performance")
             perf_col1, perf_col2 = st.columns([1, 1])
-
-            # Loss curves
             with perf_col1:
                 st.write("### Training Loss Curve")
                 epochs_range = list(range(1, len(history.get('loss', [])) + 1))
@@ -510,8 +415,6 @@ elif tab == "Predictions":
                 else:
                     fig_loss.update_layout(title="Training Loss", xaxis_title="Epoch", yaxis_title="Loss")
                 st.plotly_chart(fig_loss, use_container_width=True)
-
-            # Backtest plot: predicted vs actual
             with perf_col2:
                 st.write("### Backtest: Predictions vs Actual")
                 if len(inv_preds) > 0:
@@ -531,11 +434,7 @@ elif tab == "Predictions":
                         st.write(f"Backtest samples: {len(inv_preds)} — Test MSE: {mse:.3f} — Test R²: {r2:.3f}")
                 else:
                     st.info("Not enough backtest samples to plot predictions vs actual.")
-
-            # -------- Future Forecast (recursive multi-step) with confidence band and animation --------
             st.markdown("## Forecast (future days)")
-
-            # Build seed recent data from df_used last time_step rows
             recent = df_used.iloc[-time_step:].copy()
             recent_adj = recent['Adj Close'].tolist()
             recent_vol = recent['Volume'].tolist()
@@ -543,7 +442,6 @@ elif tab == "Predictions":
             for step in range(days):
                 sma20 = np.mean(recent_adj[-20:]) if len(recent_adj) >= 20 else np.mean(recent_adj)
                 sma50 = np.mean(recent_adj[-50:]) if len(recent_adj) >= 50 else np.mean(recent_adj)
-                # RSI on recent_adj
                 window = pd.Series(recent_adj)
                 delta_local = window.diff()
                 up_local = delta_local.clip(lower=0).fillna(0)
@@ -555,7 +453,6 @@ elif tab == "Predictions":
                 vol_local = recent_vol[-1] if len(recent_vol) > 0 else 0.0
                 feat_row = np.array([[recent_adj[-1], vol_local, sma20, sma50, rsi_local]])
                 feat_scaled = scaler_model.transform(feat_row)
-                # prepare input window scaled
                 scaled_full = scaler_model.transform(df_used.values[-time_step:])
                 input_window = np.vstack([scaled_full])
                 input_window[-1] = feat_scaled
@@ -568,29 +465,18 @@ elif tab == "Predictions":
                 future_preds.append(pred_price)
                 recent_adj.append(pred_price)
                 recent_vol.append(vol_local)
-
-            # compute confidence band: use resid_std (estimate) -> 95% CI
             z = 1.96
             band_uppers = [p + z * resid_std for p in future_preds]
             band_lowers = [p - z * resid_std for p in future_preds]
-
             future_dates = pd.date_range(start=data_main.index[-1] + pd.Timedelta(days=1), periods=days, freq='B')
             future_df = pd.DataFrame({'Date': future_dates, 'Predicted': future_preds, 'Upper': band_uppers, 'Lower': band_lowers})
-            # Animated plot creation using Plotly frames
-            # Historical trace
             hist_x = df_used.index
             hist_y = df_used['Adj Close'].values
-
-            # base figure with historical line and an initial tiny predicted point
             fig = go.Figure()
             fig.add_trace(go.Scatter(x=hist_x, y=hist_y, name='Historical', line=dict(color='#1f77b4')))
-            # initial predicted (none)
             fig.add_trace(go.Scatter(x=[future_dates[0]], y=[future_preds[0]], name='Predicted', line=dict(color='#ff7f0e')))
-            # initial band (fill)
             fig.add_trace(go.Scatter(x=[future_dates[0], future_dates[0]], y=[band_lowers[0], band_uppers[0]],
                                      fill='toself', fillcolor='rgba(255,127,14,0.15)', line=dict(color='rgba(255,127,14,0)'), showlegend=True, name='95% CI'))
-
-            # frames: progressively reveal predicted points and the band
             frames = []
             for i in range(len(future_dates)):
                 x_pred = future_dates[:i+1]
@@ -604,8 +490,6 @@ elif tab == "Predictions":
                 ], name=str(i))
                 frames.append(frame)
             fig.frames = frames
-
-            # layout: play button
             fig.update_layout(
                 title=f"{selected_ticker} — Forecast (with 95% CI)",
                 xaxis_title="Date",
@@ -613,16 +497,8 @@ elif tab == "Predictions":
                 updatemenus=[{
                     "type": "buttons",
                     "buttons": [
-                        {
-                            "label": "Play",
-                            "method": "animate",
-                            "args": [None, {"frame": {"duration": 400, "redraw": True}, "fromcurrent": True, "transition": {"duration": 200}}]
-                        },
-                        {
-                            "label": "Pause",
-                            "method": "animate",
-                            "args": [[None], {"frame": {"duration": 0, "redraw": False}, "mode": "immediate", "transition": {"duration": 0}}]
-                        }
+                        {"label": "Play", "method": "animate", "args": [None, {"frame": {"duration": 400, "redraw": True}, "fromcurrent": True, "transition": {"duration": 200}}]},
+                        {"label": "Pause", "method": "animate", "args": [[None], {"frame": {"duration": 0, "redraw": False}, "mode": "immediate", "transition": {"duration": 0}}]}
                     ],
                     "direction": "left",
                     "pad": {"r": 10, "t": 10},
@@ -633,11 +509,8 @@ elif tab == "Predictions":
                     "yanchor": "top"
                 }]
             )
-
             st.plotly_chart(fig, use_container_width=True)
             st.dataframe(future_df.style.format({"Predicted": "{:.2f}", "Upper": "{:.2f}", "Lower": "{:.2f}"}), use_container_width=True)
-
-            # final metrics display
             c1, c2, c3 = st.columns(3)
             if mse is not None:
                 c1.metric("Test MSE", f"{mse:.3f}")
@@ -649,7 +522,7 @@ elif tab == "Predictions":
 
 # ====================== SENTIMENT ======================
 elif tab == "Sentiment":
-    st.subheader("News Sentiment")
+    st.subheader("News Sentiment (Finnhub)")
     if news_posts:
         df = pd.DataFrame({'News': news_posts, 'Link': news_links, 'Score': vader_scores})
         def color(val):
@@ -721,7 +594,7 @@ elif tab == "Portfolio Analyzer":
             weights_np = np.array(weights)
             port_return = np.dot(mean_returns, weights_np)
             port_vol = np.sqrt(np.dot(weights_np.T, np.dot(cov_matrix, weights_np)))
-            risk_free = 0.03  # Assume 3%
+            risk_free = 0.03
             sharpe = (port_return - risk_free) / port_vol
             c1, c2, c3 = st.columns(3)
             c1.metric("Expected Return", f"{port_return * 100:.2f}%")
@@ -731,42 +604,17 @@ elif tab == "Portfolio Analyzer":
             fig_heat = px.imshow(corr_matrix, text_auto=True, aspect="auto", color_continuous_scale='RdBu_r', title="Correlation Heatmap")
             st.plotly_chart(fig_heat, use_container_width=True)
 
-# ====================== AUTO-SCROLLING NEWS TICKER (BOTTOM) ======================
+# ====================== AUTO-SCROLLING NEWS TICKER (Finnhub powered) ======================
 st.markdown("---")
-st.markdown("### Latest Headlines (24/7)")
+st.markdown("### Latest Headlines (Finnhub 24/7)")
 all_headlines = news_headlines + news_headlines
 animation_duration = max(15, len(news_headlines) * 3)
 st.markdown(f"""
 <style>
-.ticker-container {{
-    height: 180px;
-    overflow: hidden;
-    background: #0f172a;
-    padding: 16px;
-    border-radius: 14px;
-    box-shadow: 0 6px 24px rgba(0,0,0,0.3);
-    color: white;
-    font-family: 'Segoe UI', sans-serif;
-    position: relative;
-}}
-.ticker-wrapper {{
-    animation: scroll-up {animation_duration}s linear infinite;
-    will-change: transform;
-}}
-@keyframes scroll-up {{
-    0% {{ transform: translateY(0); }}
-    100% {{ transform: translateY(-50%); }}
-}}
-.ticker-item {{
-    padding: 12px 0;
-    font-size: 15px;
-    line-height: 1.6;
-    min-height: 40px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: normal;
-    word-wrap: break-word;
-}}
+.ticker-container {{ height: 180px; overflow: hidden; background: #0f172a; padding: 16px; border-radius: 14px; box-shadow: 0 6px 24px rgba(0,0,0,0.3); color: white; font-family: 'Segoe UI', sans-serif; position: relative; }}
+.ticker-wrapper {{ animation: scroll-up {animation_duration}s linear infinite; will-change: transform; }}
+@keyframes scroll-up {{ 0% {{ transform: translateY(0); }} 100% {{ transform: translateY(-50%); }} }}
+.ticker-item {{ padding: 12px 0; font-size: 15px; line-height: 1.6; min-height: 40px; overflow: hidden; text-overflow: ellipsis; white-space: normal; word-wrap: break-word; }}
 </style>
 """, unsafe_allow_html=True)
 html_content = '<div class="ticker-container"><div class="ticker-wrapper">'
