@@ -8,7 +8,7 @@ import plotly.express as px
 import nltk
 from nltk.sentiment.vader import SentimentIntensityAnalyzer
 import requests
-from datetime import datetime, timezone
+from datetime import datetime
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import LSTM, Dense, Dropout
 from tensorflow.keras.callbacks import EarlyStopping
@@ -79,37 +79,6 @@ st.markdown("""
     border-radius: 10px;
     color: #a8def0;
 }
-
-/* Auto-scrolling ticker */
-.ticker-container {
-    height: 180px;
-    overflow: hidden;
-    background: #0f172a;
-    padding: 16px;
-    border-radius: 14px;
-    box-shadow: 0 6px 24px rgba(0,0,0,0.3);
-    color: white;
-    font-family: 'Segoe UI', sans-serif;
-    position: relative;
-}
-.ticker-wrapper {
-    animation: scroll-up 45s linear infinite;
-    will-change: transform;
-}
-@keyframes scroll-up {
-    0% { transform: translateY(0); }
-    100% { transform: translateY(-50%); }
-}
-.ticker-item {
-    padding: 12px 0;
-    font-size: 15px;
-    line-height: 1.6;
-    min-height: 40px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: normal;
-    word-wrap: break-word;
-}
 </style>
 """, unsafe_allow_html=True)
 
@@ -167,74 +136,73 @@ if end_date > current_date:
     end_date = current_date
     st.warning(f"End date capped at today: {current_date}")
 
-# ====================== FETCH TICKER OBJECT (optional caching) ======================
+# ====================== FETCH TICKER OBJECT ======================
 @st.cache_resource(ttl=300)
 def get_ticker(ticker):
     return yf.Ticker(ticker)
 ticker_obj = get_ticker(selected_ticker)
 
-# ====================== FETCH NEWS — YAHOO FINANCE ONLY ======================
+# ====================== FETCH NEWS (NewsAPI + Yahoo Fallback) ======================
 @st.cache_data(ttl=300)
-def get_news_yahoo_only(ticker, max_items=20):
-    """
-    Fetch news exclusively from yfinance.Ticker(ticker).news (Yahoo Finance).
-    Returns headlines, posts (titles), links, dates (may be None).
-    """
+def get_news(ticker):
     try:
-        t = yf.Ticker(ticker)
-        raw_news = getattr(t, "news", None)
-        if not raw_news:
-            return ["Market quiet."], ["Market quiet."], ["#"], [None]
-
+        api_key = st.secrets.get("NEWSAPI_KEY") or ""
+        if api_key and api_key != "YOUR_NEWSAPI_KEY":
+            url = "https://newsapi.org/v2/everything"
+            params = {
+                'q': f'{ticker} stock OR {ticker} earnings OR {ticker} news',
+                'sortBy': 'publishedAt',
+                'pageSize': 10,
+                'language': 'en',
+                'apiKey': api_key
+            }
+            r = requests.get(url, params=params, timeout=10)
+            if r.status_code == 200:
+                j = r.json()
+                articles = j.get('articles', [])
+                if articles:
+                    headlines = []
+                    posts = []
+                    links = []
+                    for art in articles:
+                        title = art.get('title', '').strip()
+                        source = art.get('source', {}).get('name', 'Source').strip()
+                        url = art.get('url', '#')
+                        if title:
+                            hl = f"**{title}** – {source}"
+                            headlines.append(hl)
+                            posts.append(f"{title} – {source}")
+                            links.append(url)
+                    return headlines, posts, links
+    except:
+        pass
+    # Fallback: Yahoo Finance
+    try:
+        news = ticker_obj.news
+        if not news or len(news) == 0:
+            return ["No recent headlines."], ["No recent headlines."], ["#"]
         headlines = []
         posts = []
         links = []
-        dates = []
-        count = 0
-        for item in raw_news:
-            if count >= max_items:
-                break
-            # item is typically a dict with keys like 'title', 'publisher', 'link', 'providerPublishTime'
-            title = (item.get("title") or item.get("headline") or item.get("summary") or "").strip()
-            publisher = (item.get("publisher") or item.get("publisher_name") or item.get("source") or "").strip()
-            link = item.get("link") or item.get("url") or item.get("news_url") or "#"
-            pub_dt = None
-            if item.get("providerPublishTime"):
-                try:
-                    pub_dt = datetime.fromtimestamp(int(item.get("providerPublishTime")), tz=timezone.utc)
-                except Exception:
-                    pub_dt = None
-            elif item.get("datetime"):
-                try:
-                    pub_dt = pd.to_datetime(item.get("datetime"))
-                except Exception:
-                    pub_dt = None
-
+        for item in news[:10]:
+            title = item.get('title', '').strip()
+            pub = item.get('publisher', 'Source').strip()
+            url = item.get('link', '#')
             if title:
-                display_src = publisher or "Yahoo"
-                headlines.append(f"**{title}** – {display_src}")
-                posts.append(title)
-                links.append(link if link else "#")
-                dates.append(pub_dt)
-                count += 1
+                hl = f"**{title}** – {pub}"
+                headlines.append(hl)
+                posts.append(f"{title} – {pub}")
+                links.append(url)
+        return headlines if headlines else ["Market quiet."], posts, links
+    except:
+        return ["News feed unavailable."], ["News feed unavailable."], ["#"]
 
-        if len(posts) == 0:
-            return ["Market quiet."], ["Market quiet."], ["#"], [None]
-
-        return headlines, posts, links, dates
-    except Exception:
-        return ["News feed unavailable."], ["News feed unavailable."], ["#"], [None]
-
-news_headlines, news_posts, news_links, news_dates = get_news_yahoo_only(selected_ticker)
+news_headlines, news_posts, news_links = get_news(selected_ticker)
 
 # ====================== COMPUTE VADER SENTIMENT ======================
 @st.cache_data(ttl=300)
 def compute_vader_sentiment(posts):
-    try:
-        return [sia.polarity_scores(str(p))['compound'] for p in posts]
-    except Exception:
-        return [0.0 for _ in posts]
-
+    return [sia.polarity_scores(post)['compound'] for post in posts]
 vader_scores = compute_vader_sentiment(news_posts)
 
 # ====================== FETCH STOCK DATA (includes Volume now) ======================
@@ -258,7 +226,7 @@ def fetch_stock_data(ticker, start, end):
         if len(df) < 90:
             return None
         return df
-    except Exception:
+    except Exception as e:
         return None
 
 data_main = fetch_stock_data(selected_ticker, start_date, end_date)
@@ -464,6 +432,7 @@ elif tab == "Predictions":
             end_str = str(end_date)
 
             # ---- Show skeleton placeholders while model trains/loads ----
+            # We create visual placeholders (skeletons) so users see a loading UI instead of the default spinner.
             placeholder_box = st.empty()
             placeholder_plots = st.empty()
 
@@ -695,7 +664,6 @@ elif tab == "Sentiment":
         c3.metric("Neutral", neu)
     else:
         st.info("No news available.")
-
 
 # ====================== COMPARISON ======================
 elif tab == "Comparison":
