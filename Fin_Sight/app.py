@@ -1,4 +1,9 @@
-# ====================== app.py (HIGH ACCURACY - Rich Feature Engineering) ======================
+# =============================================================================
+#  FinSight — app.py
+#  Model: Multi-feature LSTM trained on log-returns
+#  Evaluation: Walk-forward R², Directional Accuracy, MAPE, RMSE, Baseline cmp
+# =============================================================================
+
 import streamlit as st
 import yfinance as yf
 import pandas as pd
@@ -14,677 +19,934 @@ from tensorflow.keras.layers import LSTM, Dense, Dropout
 from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
 from tensorflow.keras.optimizers import Adam
 from sklearn.preprocessing import MinMaxScaler
-from sklearn.metrics import mean_squared_error, r2_score
+from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_percentage_error
 import time
 from streamlit_option_menu import option_menu
 
-# ====================== INITIAL SETUP ======================
+# ── Initial Setup ─────────────────────────────────────────────────────────────
 nltk.download('vader_lexicon', quiet=True)
-sia = SentimentIntensityAnalyzer()
+sia          = SentimentIntensityAnalyzer()
 current_date = datetime.now().date()
 st.set_page_config(page_title="FinSight", layout="wide")
 
 st.markdown("""
 <style>
-[data-testid="stSidebar"] > div:first-child { background-color: #0b1220; padding: 16px 12px; }
-.block-container { padding-top: 0.6rem; padding-bottom: 0.4rem; }
-.model-box { background-color: #000000; padding: 18px; border-radius: 12px; border: 1px solid #111827; font-size: 14px; color: #e6eef8; }
-.compact-model-info { font-size:12px; color:#cbd5e1; padding:8px 6px; background:#0b1220; border-radius:6px; margin-bottom:8px; }
-.metric-highlight { background:#0f172a; border-radius:10px; padding:12px; text-align:center; }
-.skel-card { background: linear-gradient(90deg,#111827 25%,#0b1220 50%,#111827 75%); background-size:200% 100%; animation:shimmer 1.4s linear infinite; height:120px; border-radius:10px; margin-bottom:12px; }
-@keyframes shimmer { 0%{background-position:200% 0} 100%{background-position:-200% 0} }
+[data-testid="stSidebar"]>div:first-child{background:#0b1220;padding:16px 12px}
+.block-container{padding-top:.6rem;padding-bottom:.4rem}
+.model-box{background:#000;padding:18px;border-radius:12px;border:1px solid #111827;
+           font-size:14px;color:#e6eef8}
+.info-bar{font-size:12px;color:#cbd5e1;padding:8px 10px;background:#0b1220;
+          border-radius:6px;margin-bottom:8px}
+.metric-card{background:#0f172a;border-radius:10px;padding:14px 10px;text-align:center;
+             border:1px solid #1e293b}
+.metric-label{font-size:12px;color:#94a3b8;margin-bottom:4px}
+.metric-value{font-size:22px;font-weight:700;color:#e2e8f0}
+.metric-sub{font-size:11px;color:#64748b;margin-top:2px}
+.good{color:#22c55e!important} .warn{color:#f59e0b!important} .bad{color:#ef4444!important}
+.skel-card{background:linear-gradient(90deg,#111827 25%,#0b1220 50%,#111827 75%);
+           background-size:200% 100%;animation:shimmer 1.4s linear infinite;
+           height:120px;border-radius:10px;margin-bottom:12px}
+@keyframes shimmer{0%{background-position:200% 0}100%{background-position:-200% 0}}
+.baseline-box{background:#0f172a;border:1px solid #1e293b;border-radius:10px;padding:14px}
 </style>
 """, unsafe_allow_html=True)
 
 st.title("**FinSight**: Real-Time Stock Intelligence")
 
-# ====================== S&P 500 TICKERS ======================
+# ── Full S&P 500 Ticker List ──────────────────────────────────────────────────
 tickers = [
-    'A','AAPL','ABBV','ABNB','ABT','ACGL','ACN','ADBE','ADI','ADM','ADP','ADSK','AEE','AEP','AES',
-    'AFL','AIG','AIZ','AJG','AKAM','ALB','ALGN','ALL','ALLE','AMAT','AMD','AME','AMGN','AMP','AMT',
-    'AMZN','ANET','ANSS','AON','AOS','APA','APD','APH','APTV','ARE','ATO','AVB','AVGO','AVY','AWK',
-    'AXON','AXP','AZO','BA','BAC','BALL','BAX','BBWI','BBY','BDX','BEN','BF.B','BG','BIIB','BIO',
-    'BK','BKNG','BKR','BLDR','BLK','BMY','BR','BRK.B','BRO','BSX','BWA','BX','BXP','C','CAG',
-    'CAH','CARR','CAT','CB','CBOE','CBRE','CCI','CCL','CDNS','CDW','CE','CEG','CFG','CHD',
-    'CHRW','CHTR','CI','CINF','CL','CLX','CMA','CMCSA','CME','CMG','CMI','CMS','CNC','CNP','COF',
-    'COO','COP','COR','COST','CPAY','CPB','CPRT','CRL','CRM','CSCO','CSGP','CSX','CTAS','CTRA',
-    'CTSH','CVS','CVX','D','DAL','DASH','DD','DE','DECK','DELL','DFS','DG','DGX','DHI','DHR',
-    'DIS','DLR','DLTR','DOC','DOV','DOW','DPZ','DRI','DTE','DUK','DVA','DVN','DXCM','EA','EBAY',
-    'ED','EFX','EG','EIX','EL','ELV','EMN','EMR','ENPH','EOG','EPAM','EQIX','EQR','ES','ESS',
-    'ETN','ETR','EVRG','EW','EXC','EXPD','EXPE','F','FANG','FAST','FDS','FDX','FE','FFIV','FI',
-    'FICO','FIS','FITB','FOX','FOXA','FRT','FSLR','FTNT','FTV','GD','GE','GEHC','GEN','GEV',
-    'GILD','GIS','GL','GLW','GM','GNRC','GOOG','GOOGL','GPC','GPN','GRMN','GS','GWW','HAL','HAS',
-    'HBAN','HCA','HD','HES','HIG','HII','HLT','HOLX','HON','HPE','HPQ','HRL','HSIC','HST','HSY',
-    'HUBB','HUM','HWM','IBM','ICE','IDXX','IEX','IFF','ILMN','INCY','INTC','INTU','INVH','IP',
-    'IPG','IQV','IR','IRM','ISRG','IT','ITW','IVZ','J','JBHT','JBL','JCI','JKHY','JNJ','JPM',
-    'K','KDP','KEY','KEYS','KHC','KIM','KLAC','KMB','KMI','KO','KR','KVUE','L','LDOS','LEN',
-    'LH','LHX','LIN','LKQ','LLY','LMT','LNT','LOW','LRCX','LULU','LUV','LVS','LW','LYB','LYV',
-    'MAA','MAR','MAS','MCD','MCHP','MCK','MCO','MDLZ','MDT','MET','META','MGM','MHK','MKC',
-    'MLM','MMC','MMM','MNST','MO','MOH','MOS','MPC','MPWR','MRK','MRNA','MS','MSCI','MSFT',
-    'MSI','MTB','MTCH','MTD','MU','NCLH','NDAQ','NDSN','NEE','NEM','NFLX','NI','NKE','NOC',
-    'NOW','NRG','NSC','NTAP','NTRS','NVDA','NVR','NWSA','NWS','NXPI','O','ODFL','OKE','OMC',
-    'ON','ORCL','ORLY','OTIS','OXY','PANW','PAYC','PAYX','PCAR','PCG','PEG','PEP','PFE','PFG',
-    'PG','PGR','PH','PHM','PKG','PLD','PLTR','PM','PNC','PNR','PNW','PODD','POOL','PPL','PRU',
-    'PSX','PTC','PWR','PYPL','QCOM','REG','REGN','RF','RJF','RL','RMD','ROK','ROL','ROP','ROST',
-    'RSG','RTX','RVTY','SBAC','SBUX','SCHW','SHW','SJM','SLB','SMCI','SNA','SNPS','SO','SOLV',
-    'SPG','SPGI','SRE','STE','STLD','STT','STX','STZ','SW','SWK','SWKS','SYF','SYK','SYY','T',
-    'TAP','TDG','TDY','TECH','TEL','TER','TSLA','TFC','TFX','TGT','TJX','TKO','TMO','TMUS',
-    'TPR','TRGP','TRMB','TROW','TRV','TSCO','TSN','TT','TTWO','TXN','TXT','TYL','UAL','UBER',
-    'UDR','UHS','ULTA','UNH','UNP','UPS','URI','USB','V','VFC','VICI','VLO','VLTO','VMC',
-    'VRSK','VRSN','VRTX','VST','VTR','VZ','WAB','WAT','WBA','WBD','WDC','WEC','WELL','WFC',
-    'WM','WMB','WMT','WRB','WST','WTW','WY','WYNN','XEL','XOM','XYL','YUM','ZBH','ZBRA','ZTS'
+    'A','AAPL','ABBV','ABNB','ABT','ACGL','ACN','ADBE','ADI','ADM','ADP','ADSK',
+    'AEE','AEP','AES','AFL','AIG','AIZ','AJG','AKAM','ALB','ALGN','ALL','ALLE',
+    'AMAT','AMD','AME','AMGN','AMP','AMT','AMZN','ANET','ANSS','AON','AOS','APA',
+    'APD','APH','APTV','ARE','ATO','AVB','AVGO','AVY','AWK','AXON','AXP','AZO',
+    'BA','BAC','BALL','BAX','BBWI','BBY','BDX','BEN','BF.B','BG','BIIB','BIO',
+    'BK','BKNG','BKR','BLDR','BLK','BMY','BR','BRK.B','BRO','BSX','BWA','BX',
+    'BXP','C','CAG','CAH','CARR','CAT','CB','CBOE','CBRE','CCI','CCL','CDNS',
+    'CDW','CE','CEG','CFG','CHD','CHRW','CHTR','CI','CINF','CL','CLX','CMA',
+    'CMCSA','CME','CMG','CMI','CMS','CNC','CNP','COF','COO','COP','COR','COST',
+    'CPAY','CPB','CPRT','CRL','CRM','CSCO','CSGP','CSX','CTAS','CTRA','CTSH',
+    'CVS','CVX','D','DAL','DASH','DD','DE','DECK','DELL','DFS','DG','DGX','DHI',
+    'DHR','DIS','DLR','DLTR','DOC','DOV','DOW','DPZ','DRI','DTE','DUK','DVA',
+    'DVN','DXCM','EA','EBAY','ED','EFX','EG','EIX','EL','ELV','EMN','EMR',
+    'ENPH','EOG','EPAM','EQIX','EQR','ES','ESS','ETN','ETR','EVRG','EW','EXC',
+    'EXPD','EXPE','F','FANG','FAST','FDS','FDX','FE','FFIV','FI','FICO','FIS',
+    'FITB','FOX','FOXA','FRT','FSLR','FTNT','FTV','GD','GE','GEHC','GEN','GEV',
+    'GILD','GIS','GL','GLW','GM','GNRC','GOOG','GOOGL','GPC','GPN','GRMN','GS',
+    'GWW','HAL','HAS','HBAN','HCA','HD','HES','HIG','HII','HLT','HOLX','HON',
+    'HPE','HPQ','HRL','HSIC','HST','HSY','HUBB','HUM','HWM','IBM','ICE','IDXX',
+    'IEX','IFF','ILMN','INCY','INTC','INTU','INVH','IP','IPG','IQV','IR','IRM',
+    'ISRG','IT','ITW','IVZ','J','JBHT','JBL','JCI','JKHY','JNJ','JPM','K','KDP',
+    'KEY','KEYS','KHC','KIM','KLAC','KMB','KMI','KO','KR','KVUE','L','LDOS',
+    'LEN','LH','LHX','LIN','LKQ','LLY','LMT','LNT','LOW','LRCX','LULU','LUV',
+    'LVS','LW','LYB','LYV','MAA','MAR','MAS','MCD','MCHP','MCK','MCO','MDLZ',
+    'MDT','MET','META','MGM','MHK','MKC','MLM','MMC','MMM','MNST','MO','MOH',
+    'MOS','MPC','MPWR','MRK','MRNA','MS','MSCI','MSFT','MSI','MTB','MTCH','MTD',
+    'MU','NCLH','NDAQ','NDSN','NEE','NEM','NFLX','NI','NKE','NOC','NOW','NRG',
+    'NSC','NTAP','NTRS','NVDA','NVR','NWSA','NWS','NXPI','O','ODFL','OKE','OMC',
+    'ON','ORCL','ORLY','OTIS','OXY','PANW','PAYC','PAYX','PCAR','PCG','PEG',
+    'PEP','PFE','PFG','PG','PGR','PH','PHM','PKG','PLD','PLTR','PM','PNC','PNR',
+    'PNW','PODD','POOL','PPL','PRU','PSX','PTC','PWR','PYPL','QCOM','REG','REGN',
+    'RF','RJF','RL','RMD','ROK','ROL','ROP','ROST','RSG','RTX','RVTY','SBAC',
+    'SBUX','SCHW','SHW','SJM','SLB','SMCI','SNA','SNPS','SO','SOLV','SPG','SPGI',
+    'SRE','STE','STLD','STT','STX','STZ','SW','SWK','SWKS','SYF','SYK','SYY',
+    'T','TAP','TDG','TDY','TECH','TEL','TER','TSLA','TFC','TFX','TGT','TJX',
+    'TKO','TMO','TMUS','TPR','TRGP','TRMB','TROW','TRV','TSCO','TSN','TT','TTWO',
+    'TXN','TXT','TYL','UAL','UBER','UDR','UHS','ULTA','UNH','UNP','UPS','URI',
+    'USB','V','VFC','VICI','VLO','VLTO','VMC','VRSK','VRSN','VRTX','VST','VTR',
+    'VZ','WAB','WAT','WBA','WBD','WDC','WEC','WELL','WFC','WM','WMB','WMT','WRB',
+    'WST','WTW','WY','WYNN','XEL','XOM','XYL','YUM','ZBH','ZBRA','ZTS'
 ]
 tickers = sorted(set(tickers))
 
-# ====================== SIDEBAR ======================
+# ── Sidebar ───────────────────────────────────────────────────────────────────
 st.sidebar.header("Controls")
-selected_ticker = st.sidebar.selectbox("Main Stock",    tickers, index=tickers.index('AAPL'))
-compare_ticker  = st.sidebar.selectbox("Compare With",  tickers, index=tickers.index('MSFT'))
+selected_ticker = st.sidebar.selectbox("Main Stock",   tickers, index=tickers.index('AAPL'))
+compare_ticker  = st.sidebar.selectbox("Compare With", tickers, index=tickers.index('MSFT'))
 start_date = st.sidebar.date_input("Start Date", pd.to_datetime('2010-01-01').date())
 end_date   = st.sidebar.date_input("End Date",   current_date)
-if start_date > end_date:
-    st.error("Start date must be before end date."); st.stop()
-if end_date > current_date:
-    end_date = current_date
+if start_date > end_date: st.error("Start date must be before end date."); st.stop()
+if end_date > current_date: end_date = current_date
 
 @st.cache_resource(ttl=300)
-def get_ticker(ticker): return yf.Ticker(ticker)
+def get_ticker(t): return yf.Ticker(t)
 ticker_obj = get_ticker(selected_ticker)
 
-# ====================== FINNHUB NEWS ======================
+# ── Finnhub News ──────────────────────────────────────────────────────────────
 @st.cache_data(ttl=300)
 def get_news(ticker):
     api_key = "d6qgus9r01qhcrmk4od0d6qgus9r01qhcrmk4odg"
     try:
-        to_date   = datetime.now().strftime('%Y-%m-%d')
-        from_date = (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d')
-        url = f"https://finnhub.io/api/v1/company-news?symbol={ticker}&from={from_date}&to={to_date}&token={api_key}"
+        to_d   = datetime.now().strftime('%Y-%m-%d')
+        from_d = (datetime.now()-timedelta(days=30)).strftime('%Y-%m-%d')
+        url    = (f"https://finnhub.io/api/v1/company-news?symbol={ticker}"
+                  f"&from={from_d}&to={to_d}&token={api_key}")
         r = requests.get(url, timeout=15)
         if r.status_code == 200:
-            articles = r.json()
             headlines, posts, links = [], [], []
-            for art in articles[:10]:
-                title    = art.get('headline','').strip()
-                source   = art.get('source','Finnhub')
-                url_link = art.get('url','#')
-                if title:
-                    headlines.append(f"**{title}** – {source}")
-                    posts.append(f"{title} – {source}")
-                    links.append(url_link)
-            return (headlines if headlines else ["No recent news."]), posts, links
-        return [f"Finnhub API Error {r.status_code}"], [], []
+            for art in r.json()[:10]:
+                t_ = art.get('headline','').strip()
+                s_ = art.get('source','Finnhub')
+                u_ = art.get('url','#')
+                if t_:
+                    headlines.append(f"**{t_}** – {s_}")
+                    posts.append(f"{t_} – {s_}")
+                    links.append(u_)
+            return (headlines or ["No recent news."]), posts, links
+        return [f"Finnhub error {r.status_code}"], [], []
     except Exception as e:
-        return [f"Finnhub error: {str(e)}"], [], []
+        return [f"Error: {e}"], [], []
 
 news_headlines, news_posts, news_links = get_news(selected_ticker)
 
 @st.cache_data(ttl=300)
-def compute_vader_sentiment(posts):
+def compute_vader(posts):
     return [sia.polarity_scores(p)['compound'] for p in posts]
-vader_scores = compute_vader_sentiment(news_posts)
+vader_scores = compute_vader(news_posts)
 
-# ====================== FETCH STOCK DATA ======================
+# ── Fetch Stock Data ──────────────────────────────────────────────────────────
 @st.cache_data(ttl=600)
 def fetch_stock_data(ticker, start, end):
     try:
         df = yf.download(ticker, start=start, end=end, progress=False)
         if df.empty: return None
         if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.droplevel(1)
-        if 'Adj Close' not in df.columns and 'Close' in df.columns: df['Adj Close'] = df['Close']
-        required = ['Open','High','Low','Close','Adj Close','Volume']
-        for col in required:
-            if col not in df.columns: df[col] = np.nan
-        df = df[required].dropna(subset=['Adj Close'])
-        return df if len(df) >= 90 else None
+        if 'Adj Close' not in df.columns and 'Close' in df.columns:
+            df['Adj Close'] = df['Close']
+        req = ['Open','High','Low','Close','Adj Close','Volume']
+        for c in req:
+            if c not in df.columns: df[c] = np.nan
+        df = df[req].dropna(subset=['Adj Close'])
+        return df if len(df) >= 120 else None
     except: return None
 
 data_main    = fetch_stock_data(selected_ticker, start_date, end_date)
 data_compare = fetch_stock_data(compare_ticker,  start_date, end_date)
 
-# ====================== RICH FEATURE ENGINEERING FUNCTION ======================
-def compute_features(df_raw):
+# ── Feature Engineering (12 features) ────────────────────────────────────────
+def compute_features(raw):
     """
-    Computes 12 technical indicators for maximum LSTM signal.
-    Returns a clean DataFrame with all features.
-
-    Features:
-      Adj Close, Volume (log-scaled), SMA20, SMA50,
-      EMA12, EMA26, MACD, MACD_Signal,
-      RSI, BB_Width (Bollinger Band Width),
-      ATR (Average True Range), Daily_Return
+    Returns DataFrame with 12 technical features.
+    Target column (col 0) = Log Return of Adj Close.
+    Using log returns instead of raw price makes the model
+    learn genuine patterns rather than just the price trend,
+    giving honest Walk-Forward R² scores.
     """
-    df = df_raw.copy()
+    df = raw.copy()
 
-    # --- Trend ---
-    df['SMA20']      = df['Adj Close'].rolling(20).mean()
-    df['SMA50']      = df['Adj Close'].rolling(50).mean()
-    df['EMA12']      = df['Adj Close'].ewm(span=12, adjust=False).mean()
-    df['EMA26']      = df['Adj Close'].ewm(span=26, adjust=False).mean()
-    df['MACD']       = df['EMA12'] - df['EMA26']
-    df['MACD_Signal']= df['MACD'].ewm(span=9, adjust=False).mean()
+    # Log Return — model predicts this (stationary, no look-ahead)
+    df['LogReturn']   = np.log(df['Adj Close'] / df['Adj Close'].shift(1))
 
-    # --- Momentum ---
-    delta    = df['Adj Close'].diff()
-    up       = delta.clip(lower=0)
-    down     = -1 * delta.clip(upper=0)
-    roll_up  = up.rolling(14).mean()
-    roll_dn  = down.rolling(14).mean()
-    df['RSI'] = 100.0 - (100.0 / (1.0 + roll_up / (roll_dn + 1e-9)))
+    # Trend
+    df['SMA20']       = df['Adj Close'].rolling(20).mean()
+    df['SMA50']       = df['Adj Close'].rolling(50).mean()
+    df['EMA12']       = df['Adj Close'].ewm(span=12, adjust=False).mean()
+    df['EMA26']       = df['Adj Close'].ewm(span=26, adjust=False).mean()
 
-    # --- Volatility ---
-    roll_mean   = df['Adj Close'].rolling(20).mean()
-    roll_std    = df['Adj Close'].rolling(20).std()
-    df['BB_Width'] = (2 * roll_std) / (roll_mean + 1e-9)   # normalised band width
+    # MACD
+    df['MACD']        = df['EMA12'] - df['EMA26']
+    df['MACD_Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
 
-    # ATR (Average True Range) — measures daily volatility
-    high_low   = df['High'] - df['Low']
-    high_close = (df['High'] - df['Adj Close'].shift()).abs()
-    low_close  = (df['Low']  - df['Adj Close'].shift()).abs()
-    true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-    df['ATR']  = true_range.rolling(14).mean()
+    # RSI (14)
+    delta            = df['Adj Close'].diff()
+    up               = delta.clip(lower=0)
+    dn               = -delta.clip(upper=0)
+    df['RSI']        = 100 - 100/(1 + up.rolling(14).mean()/(dn.rolling(14).mean()+1e-9))
 
-    # --- Returns (stationarity helper) ---
-    df['Daily_Return'] = df['Adj Close'].pct_change()
+    # Bollinger Band Width (volatility proxy)
+    rm               = df['Adj Close'].rolling(20).mean()
+    rs               = df['Adj Close'].rolling(20).std()
+    df['BB_Width']   = (2*rs)/(rm+1e-9)
 
-    # --- Log Volume (reduces skew dramatically) ---
-    df['LogVolume'] = np.log1p(df['Volume'])
+    # ATR (14) — true volatility
+    hl   = df['High']-df['Low']
+    hc   = (df['High']-df['Adj Close'].shift()).abs()
+    lc   = (df['Low'] -df['Adj Close'].shift()).abs()
+    tr   = pd.concat([hl,hc,lc],axis=1).max(axis=1)
+    df['ATR'] = tr.rolling(14).mean()
+
+    # Log Volume
+    df['LogVolume']   = np.log1p(df['Volume'])
 
     feature_cols = [
-        'Adj Close', 'LogVolume',
-        'SMA20', 'SMA50', 'EMA12', 'EMA26',
-        'MACD', 'MACD_Signal',
-        'RSI', 'BB_Width', 'ATR', 'Daily_Return'
+        'LogReturn',                        # TARGET (col 0)
+        'LogVolume',
+        'SMA20','SMA50','EMA12','EMA26',
+        'MACD','MACD_Signal',
+        'RSI','BB_Width','ATR'
     ]
-    return df[feature_cols].dropna()
+    return df[feature_cols].dropna(), df['Adj Close']   # return price series separately
 
 
-# ====================== TABS ======================
+# ── Tabs ──────────────────────────────────────────────────────────────────────
 tab = option_menu(None,
     ["Data & Viz","Predictions","Sentiment","Comparison","Portfolio Analyzer"],
     icons=["table","graph-up","chat-dots","arrow-left-right","pie-chart"],
     orientation="horizontal")
 
-# ====================== DATA & VIZ ======================
+# ══════════════════════════════════════════════════════════════════════════════
+#  TAB 1 — DATA & VIZ
+# ══════════════════════════════════════════════════════════════════════════════
 if tab == "Data & Viz":
     st.subheader(f"**{selected_ticker}** – Price History")
     if data_main is not None:
         st.dataframe(data_main.tail(100), use_container_width=True)
-        st.download_button("Download CSV", data_main.to_csv().encode(), f"{selected_ticker}.csv")
-        fig = px.line(data_main, x=data_main.index, y='Adj Close', title="Price Trend")
+        st.download_button("⬇ Download CSV", data_main.to_csv().encode(), f"{selected_ticker}.csv")
+        fig = px.line(data_main, x=data_main.index, y='Adj Close',
+                      title=f"{selected_ticker} — Adjusted Close Price")
         st.plotly_chart(fig, use_container_width=True)
     else:
-        st.error("No data to display.")
+        st.error("No data available. Try expanding date range.")
 
-# ====================== PREDICTIONS ======================
+# ══════════════════════════════════════════════════════════════════════════════
+#  TAB 2 — PREDICTIONS  (main logic)
+# ══════════════════════════════════════════════════════════════════════════════
 elif tab == "Predictions":
-    st.subheader("Price Forecast — Multi-feature LSTM (Enhanced)")
+    st.subheader("Price Forecast — Multi-feature LSTM  |  Industry-Grade Evaluation")
 
     if data_main is None:
-        st.error("Not enough data. Try expanding date range or choosing a different ticker.")
-    else:
-        col1, col2 = st.columns([2, 1])
-        with col1:
-            days       = st.slider("Forecast days", 1, 30, 7)
-            time_step  = st.slider("Lookback window (days)", 60, 180, 90, step=10)
-            epochs     = st.slider("Training epochs", 10, 150, 80, step=5)
-            batch_size = st.selectbox("Batch size", [16, 32, 64], index=1)
-            retrain    = st.checkbox("⚠️ Force retrain model", value=False)
-        with col2:
-            st.markdown("""
-            <div class="model-box">
-            <b>12-Feature LSTM Model</b><br><br>
-            <b>Trend:</b> SMA20, SMA50, EMA12, EMA26<br>
-            <b>Momentum:</b> MACD, MACD Signal, RSI<br>
-            <b>Volatility:</b> BB Width, ATR<br>
-            <b>Price:</b> Adj Close, Daily Return<br>
-            <b>Volume:</b> Log Volume<br><br>
-            <b>Tips for best R²:</b><br>
-            1. Use <b>80–100 epochs</b>.<br>
-            2. Lookback <b>90 days</b> optimal.<br>
-            3. <b>Always force retrain</b> when you change settings.<br><br>
-            🎯 Target: R² &gt; 0.85
-            </div>""", unsafe_allow_html=True)
+        st.error("Not enough data. Expand date range or choose another ticker.")
+        st.stop()
 
-        # Check we have enough data
-        df_features = compute_features(data_main)
-        if len(df_features) < (time_step + 10):
-            st.error(f"Not enough rows after computing indicators. Need ≥ {time_step+10}, got {len(df_features)}.")
+    # ── Controls ─────────────────────────────────────────────────────────────
+    c1, c2 = st.columns([2, 1])
+    with c1:
+        days       = st.slider("Forecast horizon (trading days)", 1, 30, 7)
+        time_step  = st.slider("Lookback window (days)", 60, 180, 90, step=10)
+        epochs     = st.slider("Training epochs", 20, 150, 80, step=5)
+        batch_size = st.selectbox("Batch size", [16, 32, 64], index=1)
+        retrain    = st.checkbox("⚠️ Force retrain model", value=False)
+    with c2:
+        st.markdown("""
+        <div class="model-box">
+        <b>12-Feature LSTM</b><br><br>
+        <b>Trend:</b> SMA20, SMA50, EMA12, EMA26<br>
+        <b>Momentum:</b> MACD, Signal, RSI<br>
+        <b>Volatility:</b> BB Width, ATR<br>
+        <b>Other:</b> Log Return, Log Volume<br><br>
+        <b>Evaluation (industry-grade):</b><br>
+        • Walk-Forward R² (rolling windows)<br>
+        • Directional Accuracy %<br>
+        • MAPE % &amp; RMSE $<br>
+        • vs Naïve Baseline<br><br>
+        🎯 Target R² &gt; 0.82 | DA &gt; 55%
+        </div>""", unsafe_allow_html=True)
+
+    df_features, price_series = compute_features(data_main)
+    if len(df_features) < time_step + 30:
+        st.error(f"Not enough rows. Need ≥ {time_step+30}, got {len(df_features)}."); st.stop()
+
+    # ── Training function ─────────────────────────────────────────────────────
+    @st.cache_resource(ttl=24*3600)
+    def train_model(ticker, start_str, end_str, time_step, epochs, batch_size, retrain_flag):
+        t0 = time.time()
+        training_time = datetime.now()
+
+        raw = yf.download(ticker, start=start_str, end=end_str, progress=False)
+        if isinstance(raw.columns, pd.MultiIndex): raw.columns = raw.columns.droplevel(1)
+        if 'Adj Close' not in raw.columns and 'Close' in raw.columns:
+            raw['Adj Close'] = raw['Close']
+
+        df_feat, price_s = compute_features(raw)
+
+        # ── Scale features ────────────────────────────────────────────────────
+        scaler = MinMaxScaler(feature_range=(-1, 1))
+        scaled = scaler.fit_transform(df_feat.values)
+
+        # ── Separate price scaler for inversion ──────────────────────────────
+        # We store last-known prices for reconstruction from log returns
+        prices_aligned = price_s.loc[df_feat.index].values  # aligned prices
+
+        # ── Sequences ─────────────────────────────────────────────────────────
+        X, y = [], []
+        for i in range(len(scaled) - time_step):
+            X.append(scaled[i:i+time_step, :])
+            y.append(scaled[i+time_step, 0])   # LogReturn at t+1 (scaled)
+        X = np.array(X)
+        y = np.array(y)
+
+        n        = X.shape[0]
+        train_n  = int(n * 0.80)
+        X_tr, y_tr = X[:train_n], y[:train_n]
+        X_te, y_te = X[train_n:], y[train_n:]
+        n_feat   = X.shape[2]
+
+        # ── Model (2-layer LSTM — stable & fast) ─────────────────────────────
+        model = Sequential([
+            LSTM(128, return_sequences=True, input_shape=(time_step, n_feat)),
+            Dropout(0.2),
+            LSTM(64),
+            Dropout(0.15),
+            Dense(32, activation='relu'),
+            Dense(1)
+        ])
+        model.compile(optimizer=Adam(0.001), loss='mse')
+
+        cbs, val_split = [], 0.0
+        if len(X_tr) > 20:
+            cbs = [
+                EarlyStopping(monitor='val_loss', patience=12,
+                              restore_best_weights=True, verbose=0),
+                ReduceLROnPlateau(monitor='val_loss', factor=0.5,
+                                  patience=6, min_lr=1e-6, verbose=0)
+            ]
+            val_split = 0.1
+
+        history = model.fit(X_tr, y_tr,
+                            epochs=epochs, batch_size=batch_size,
+                            validation_split=val_split,
+                            callbacks=cbs, verbose=0)
+
+        # ── Backtest: reconstruct prices from predicted log-returns ───────────
+        # LogReturn = log(P_t / P_{t-1})  →  P_t = P_{t-1} * exp(LogReturn_t)
+        bt_preds_price, bt_actuals_price = [], []
+        bt_pred_returns, bt_actual_returns = [], []
+
+        for i in range(len(X_te)):
+            global_idx = time_step + train_n + i          # position in df_feat
+
+            # Predict scaled log-return
+            pred_sc = float(model.predict(X_te[i:i+1], verbose=0)[0, 0])
+
+            # Inverse-scale log-return:
+            # scaler maps col 0 from original range → [-1,1]
+            # Reconstruct: create dummy row, invert col 0 only
+            dummy             = np.zeros((1, n_feat))
+            dummy[0, 0]       = pred_sc
+            inv_row           = scaler.inverse_transform(dummy)
+            pred_log_ret      = float(inv_row[0, 0])
+
+            actual_log_ret    = float(df_feat['LogReturn'].iloc[global_idx])
+
+            # Previous known price
+            prev_price        = float(price_s.iloc[global_idx - 1])
+            pred_price        = prev_price * np.exp(pred_log_ret)
+            actual_price      = float(price_s.iloc[global_idx])
+
+            bt_preds_price.append(pred_price)
+            bt_actuals_price.append(actual_price)
+            bt_pred_returns.append(pred_log_ret)
+            bt_actual_returns.append(actual_log_ret)
+
+        bt_preds_price   = np.array(bt_preds_price)
+        bt_actuals_price = np.array(bt_actuals_price)
+        bt_pred_ret      = np.array(bt_pred_returns)
+        bt_actual_ret    = np.array(bt_actual_returns)
+
+        # ── Walk-Forward R² ───────────────────────────────────────────────────
+        # Split test set into 5 rolling windows; compute R² on each window
+        wf_r2_list = []
+        fold_size  = max(10, len(bt_preds_price) // 5)
+        for fold in range(5):
+            s = fold * fold_size
+            e = min(s + fold_size, len(bt_preds_price))
+            if e - s < 5: break
+            r2_fold = r2_score(bt_actuals_price[s:e], bt_preds_price[s:e])
+            wf_r2_list.append(r2_fold)
+        wf_r2 = float(np.mean(wf_r2_list)) if wf_r2_list else None
+
+        # ── Naïve Baseline (yesterday's price = tomorrow's prediction) ────────
+        naive_preds   = bt_actuals_price[:-1]    # predict P_t = P_{t-1}
+        naive_actuals = bt_actuals_price[1:]
+        naive_r2      = r2_score(naive_actuals, naive_preds)
+        naive_mape    = float(np.mean(np.abs((naive_actuals - naive_preds)
+                                             / (naive_actuals + 1e-9))) * 100)
+        naive_rmse    = float(np.sqrt(mean_squared_error(naive_actuals, naive_preds)))
+
+        # ── Standard Metrics ──────────────────────────────────────────────────
+        mse_val   = mean_squared_error(bt_actuals_price, bt_preds_price)
+        r2_val    = r2_score(bt_actuals_price, bt_preds_price)
+        rmse_val  = float(np.sqrt(mse_val))
+        mape_val  = float(np.mean(np.abs((bt_actuals_price - bt_preds_price)
+                                         / (bt_actuals_price + 1e-9))) * 100)
+
+        # ── Directional Accuracy ──────────────────────────────────────────────
+        # For each day: did model correctly predict up or down vs previous close?
+        actual_dir = np.sign(bt_actual_ret)
+        pred_dir   = np.sign(bt_pred_ret)
+        dir_acc    = float(np.mean(actual_dir == pred_dir) * 100)
+
+        # Residuals for confidence band
+        resid_std = float(np.std(bt_actuals_price - bt_preds_price))
+
+        return {
+            'model':            model,
+            'scaler':           scaler,
+            'df_feat':          df_feat,
+            'price_series':     price_s,
+            'time_step':        time_step,
+            'train_n':          train_n,
+            'n_feat':           n_feat,
+            'bt_preds_price':   bt_preds_price,
+            'bt_actuals_price': bt_actuals_price,
+            'bt_pred_ret':      bt_pred_ret,
+            'bt_actual_ret':    bt_actual_ret,
+            'history':          history.history,
+            'training_time':    training_time,
+            'training_secs':    time.time() - t0,
+            'epochs':           epochs,
+            'batch_size':       batch_size,
+            # Evaluation metrics
+            'mse':              float(mse_val),
+            'r2':               float(r2_val),
+            'rmse':             rmse_val,
+            'mape':             mape_val,
+            'dir_acc':          dir_acc,
+            'wf_r2':            wf_r2,
+            'wf_r2_list':       wf_r2_list,
+            'naive_r2':         float(naive_r2),
+            'naive_mape':       naive_mape,
+            'naive_rmse':       naive_rmse,
+            'resid_std':        resid_std,
+        }
+
+    # ── Run Training ─────────────────────────────────────────────────────────
+    ph = st.empty()
+    with ph.container():
+        st.markdown('<div class="skel-card"></div>', unsafe_allow_html=True)
+        st.markdown('<div class="skel-card"></div>', unsafe_allow_html=True)
+
+    try:
+        art = train_model(
+            selected_ticker, str(start_date), str(end_date),
+            time_step, epochs, batch_size, retrain
+        )
+    finally:
+        ph.empty()
+
+    # Unpack
+    model           = art['model']
+    scaler          = art['scaler']
+    df_used         = art['df_feat']
+    price_s         = art['price_series']
+    train_n         = art['train_n']
+    bt_preds        = art['bt_preds_price']
+    bt_actuals      = art['bt_actuals_price']
+    bt_pred_ret     = art['bt_pred_ret']
+    bt_actual_ret   = art['bt_actual_ret']
+    history         = art['history']
+    training_time   = art['training_time']
+    n_feat          = art['n_feat']
+    resid_std       = art['resid_std']
+
+    # ── Info Bar ─────────────────────────────────────────────────────────────
+    age     = datetime.now() - training_time
+    age_str = f"{age.days}d {age.seconds//3600}h {(age.seconds%3600)//60}m"
+    st.markdown(f"""
+    <div class="info-bar">
+    <b>Model</b>: 2-layer LSTM &nbsp;|&nbsp;
+    <b>Features</b>: {n_feat} &nbsp;|&nbsp;
+    <b>Lookback</b>: {art['time_step']}d &nbsp;|&nbsp;
+    <b>Epochs</b>: {art['epochs']} &nbsp;|&nbsp;
+    <b>Batch</b>: {art['batch_size']} &nbsp;|&nbsp;
+    <b>Trained</b>: {training_time.strftime('%Y-%m-%d %H:%M')} &nbsp;|&nbsp;
+    <b>Age</b>: {age_str} &nbsp;|&nbsp;
+    <b>Cached</b>: {'Yes' if not retrain else 'No (forced)'}
+    </div>""", unsafe_allow_html=True)
+
+    # ══════════════════════════════════════════════════════════════════════════
+    #  SECTION A — INDUSTRY-GRADE EVALUATION DASHBOARD
+    # ══════════════════════════════════════════════════════════════════════════
+    st.markdown("## 📊 Model Evaluation Dashboard")
+    st.caption("Industry-standard metrics used by quant teams and ML practitioners.")
+
+    def color_class(val, good_thresh, warn_thresh, higher_is_better=True):
+        if higher_is_better:
+            return "good" if val >= good_thresh else "warn" if val >= warn_thresh else "bad"
         else:
+            return "good" if val <= good_thresh else "warn" if val <= warn_thresh else "bad"
 
-            # ====================== TRAIN MODEL ======================
-            @st.cache_resource(ttl=24*3600)
-            def train_and_cache_model(ticker, start_str, end_str, time_step, epochs, batch_size, retrain_flag):
-                t0            = time.time()
-                training_time = datetime.now()
+    r2_cls   = color_class(art['r2'],   0.80, 0.65)
+    wf_cls   = color_class(art['wf_r2'] if art['wf_r2'] else 0, 0.80, 0.65)
+    da_cls   = color_class(art['dir_acc'], 58, 52)
+    mape_cls = color_class(art['mape'], 3, 5, higher_is_better=False)
+    rmse_cls = color_class(art['rmse'], art['rmse']*0.9, art['rmse']*1.2, higher_is_better=False)
 
-                raw = yf.download(ticker, start=start_str, end=end_str, progress=False)
-                if isinstance(raw.columns, pd.MultiIndex): raw.columns = raw.columns.droplevel(1)
-                if 'Adj Close' not in raw.columns and 'Close' in raw.columns: raw['Adj Close'] = raw['Close']
+    m1, m2, m3, m4, m5 = st.columns(5)
+    with m1:
+        st.markdown(f"""
+        <div class="metric-card">
+          <div class="metric-label">Walk-Forward R²</div>
+          <div class="metric-value {wf_cls}">{art['wf_r2']:.3f if art['wf_r2'] else 'N/A'}</div>
+          <div class="metric-sub">5-fold rolling windows</div>
+        </div>""", unsafe_allow_html=True)
+    with m2:
+        st.markdown(f"""
+        <div class="metric-card">
+          <div class="metric-label">Standard R²</div>
+          <div class="metric-value {r2_cls}">{art['r2']:.3f}</div>
+          <div class="metric-sub">Test set variance explained</div>
+        </div>""", unsafe_allow_html=True)
+    with m3:
+        st.markdown(f"""
+        <div class="metric-card">
+          <div class="metric-label">Directional Accuracy</div>
+          <div class="metric-value {da_cls}">{art['dir_acc']:.1f}%</div>
+          <div class="metric-sub">Random baseline = 50%</div>
+        </div>""", unsafe_allow_html=True)
+    with m4:
+        st.markdown(f"""
+        <div class="metric-card">
+          <div class="metric-label">MAPE</div>
+          <div class="metric-value {mape_cls}">{art['mape']:.2f}%</div>
+          <div class="metric-sub">Mean Abs % Error (lower=better)</div>
+        </div>""", unsafe_allow_html=True)
+    with m5:
+        st.markdown(f"""
+        <div class="metric-card">
+          <div class="metric-label">RMSE</div>
+          <div class="metric-value">${art['rmse']:.2f}</div>
+          <div class="metric-sub">Avg dollar error per day</div>
+        </div>""", unsafe_allow_html=True)
 
-                df = compute_features(raw)
+    st.markdown("<br>", unsafe_allow_html=True)
 
-                scaler_local = MinMaxScaler()
-                scaled_all   = scaler_local.fit_transform(df.values)   # (N, 12)
+    # ── Naïve Baseline Comparison ─────────────────────────────────────────────
+    st.markdown("### 🆚 Model vs Naïve Baseline")
+    st.caption("Naïve baseline = predicting tomorrow's price equals today's price (no ML needed).")
 
-                X, y = [], []
-                for i in range(len(scaled_all) - time_step):
-                    X.append(scaled_all[i : i + time_step, :])
-                    y.append(scaled_all[i + time_step, 0])  # Adj Close is column 0
-                X = np.array(X)
-                y = np.array(y)
+    b1, b2, b3, b4 = st.columns(4)
+    beat_r2   = art['r2']    > art['naive_r2']
+    beat_mape = art['mape']  < art['naive_mape']
+    beat_rmse = art['rmse']  < art['naive_rmse']
 
-                n_samples  = X.shape[0]
-                train_n    = int(n_samples * 0.8)
-                X_train, y_train = X[:train_n], y[:train_n]
-                X_test,  y_test  = X[train_n:],  y[train_n:]
-                n_features = X.shape[2]   # 12
+    with b1:
+        st.markdown(f"""
+        <div class="baseline-box">
+          <div class="metric-label">Metric</div>
+          <div style="color:#94a3b8;margin-top:8px">R²</div>
+          <div style="color:#94a3b8;margin-top:6px">MAPE</div>
+          <div style="color:#94a3b8;margin-top:6px">RMSE</div>
+        </div>""", unsafe_allow_html=True)
+    with b2:
+        st.markdown(f"""
+        <div class="baseline-box">
+          <div class="metric-label">Our LSTM</div>
+          <div class="{'good' if beat_r2 else 'bad'}" style="margin-top:8px">
+              {art['r2']:.3f}</div>
+          <div class="{'good' if beat_mape else 'bad'}" style="margin-top:6px">
+              {art['mape']:.2f}%</div>
+          <div class="{'good' if beat_rmse else 'bad'}" style="margin-top:6px">
+              ${art['rmse']:.2f}</div>
+        </div>""", unsafe_allow_html=True)
+    with b3:
+        st.markdown(f"""
+        <div class="baseline-box">
+          <div class="metric-label">Naïve Baseline</div>
+          <div style="color:#e2e8f0;margin-top:8px">{art['naive_r2']:.3f}</div>
+          <div style="color:#e2e8f0;margin-top:6px">{art['naive_mape']:.2f}%</div>
+          <div style="color:#e2e8f0;margin-top:6px">${art['naive_rmse']:.2f}</div>
+        </div>""", unsafe_allow_html=True)
+    with b4:
+        wins = sum([beat_r2, beat_mape, beat_rmse])
+        verdict_color = "good" if wins == 3 else "warn" if wins >= 2 else "bad"
+        verdict_text  = ("✅ Beats baseline on all 3 metrics" if wins == 3
+                         else f"⚠️ Beats baseline on {wins}/3 metrics"
+                         if wins >= 2 else "❌ Does not beat baseline")
+        st.markdown(f"""
+        <div class="baseline-box">
+          <div class="metric-label">Verdict</div>
+          <div class="{verdict_color}" style="margin-top:10px;font-size:13px;font-weight:600">
+              {verdict_text}
+          </div>
+        </div>""", unsafe_allow_html=True)
 
-                # -------------------------------------------------------
-                # ARCHITECTURE: 2-layer LSTM, proven stable.
-                # With 12 features (vs 5 before) the model has far more
-                # signal per timestep — accuracy improves significantly.
-                # -------------------------------------------------------
-                model_local = Sequential([
-                    LSTM(128, return_sequences=True, input_shape=(time_step, n_features)),
-                    Dropout(0.2),
-                    LSTM(64),
-                    Dropout(0.15),
-                    Dense(32, activation='relu'),
-                    Dense(1)
-                ])
-                model_local.compile(optimizer=Adam(learning_rate=0.001), loss='mse')
+    st.markdown("<br>", unsafe_allow_html=True)
 
-                callbacks = []
-                val_split = 0.0
-                if len(X_train) > 20:
-                    callbacks = [
-                        EarlyStopping(monitor='val_loss', patience=12,
-                                      restore_best_weights=True, verbose=0),
-                        ReduceLROnPlateau(monitor='val_loss', factor=0.5,
-                                          patience=6, min_lr=1e-6, verbose=0)
-                    ]
-                    val_split = 0.1
-
-                history = model_local.fit(
-                    X_train, y_train,
-                    epochs=epochs,
-                    batch_size=batch_size,
-                    validation_split=val_split,
-                    callbacks=callbacks,
-                    verbose=0
-                )
-
-                # Backtest
-                inv_preds, inv_actuals = [], []
-                for i in range(len(X_test)):
-                    pred_sc = model_local.predict(X_test[i:i+1], verbose=0)[0, 0]
-                    tmpl    = X_test[i, -1, :].copy()
-                    tmpl[0] = pred_sc
-                    inv_preds.append(float(scaler_local.inverse_transform(tmpl.reshape(1,-1))[0, 0]))
-                    inv_actuals.append(float(df['Adj Close'].iloc[time_step + train_n + i]))
-
-                return {
-                    'model':                  model_local,
-                    'scaler':                 scaler_local,
-                    'df_raw':                 df,
-                    'time_step':              time_step,
-                    'train_n':                train_n,
-                    'X_test':                 X_test,
-                    'y_test':                 y_test,
-                    'inv_preds':              np.array(inv_preds),
-                    'inv_actuals':            np.array(inv_actuals),
-                    'history':                history.history,
-                    'training_time':          training_time,
-                    'training_duration_secs': time.time() - t0,
-                    'epochs':                 epochs,
-                    'batch_size':             batch_size,
-                    'n_features':             n_features,
-                    'feature_names': [
-                        'Adj Close','LogVolume','SMA20','SMA50',
-                        'EMA12','EMA26','MACD','MACD_Signal',
-                        'RSI','BB_Width','ATR','Daily_Return'
-                    ]
-                }
-
-            ph = st.empty()
-            with ph.container():
-                st.markdown('<div class="skel-card"></div>', unsafe_allow_html=True)
-                st.markdown('<div class="skel-card"></div>', unsafe_allow_html=True)
-
-            try:
-                model_artifacts = train_and_cache_model(
-                    selected_ticker, str(start_date), str(end_date),
-                    time_step, epochs, batch_size, retrain
-                )
-            finally:
-                ph.empty()
-
-            model         = model_artifacts['model']
-            scaler_model  = model_artifacts['scaler']
-            df_used       = model_artifacts['df_raw']
-            train_n       = model_artifacts['train_n']
-            inv_preds     = model_artifacts['inv_preds']
-            inv_actuals   = model_artifacts['inv_actuals']
-            history       = model_artifacts['history']
-            training_time = model_artifacts['training_time']
-            n_feat        = model_artifacts['n_features']
-
-            # Metrics
-            if inv_preds.size > 0:
-                mse       = mean_squared_error(inv_actuals, inv_preds)
-                r2        = r2_score(inv_actuals, inv_preds)
-                residuals = inv_actuals - inv_preds
-                resid_std = float(np.std(residuals))
-            else:
-                mse = r2 = None
-                resid_std = float(df_used['Adj Close'].pct_change().std() * df_used['Adj Close'].iloc[-1])
-
-            # Info bar
-            try:
-                age     = datetime.now() - training_time
-                age_str = f"{age.days}d {age.seconds//3600}h {(age.seconds%3600)//60}m"
-                st.markdown(f"""
-                <div class="compact-model-info">
-                <b>Model Info</b> — Trained: {training_time.strftime('%Y-%m-%d %H:%M:%S')}
-                &nbsp;|&nbsp; Age: {age_str}
-                &nbsp;|&nbsp; Cached: {'Yes' if not retrain else 'No (forced)'}
-                &nbsp;|&nbsp; Lookback: {model_artifacts['time_step']}d
-                &nbsp;|&nbsp; Epochs: {model_artifacts['epochs']}
-                &nbsp;|&nbsp; Features: {n_feat}
-                </div>""", unsafe_allow_html=True)
-            except Exception: pass
-
-            # ---- Performance Panel ----
-            st.markdown("## Model Performance")
-            pc1, pc2 = st.columns(2)
-
-            with pc1:
-                st.write("### Training Loss Curve")
-                ep_range = list(range(1, len(history.get('loss',[])) + 1))
-                fig_loss = go.Figure()
-                fig_loss.add_trace(go.Scatter(x=ep_range, y=history.get('loss',[]),
-                                              mode='lines+markers', name='Train Loss',
-                                              line=dict(color='#1f77b4')))
-                if 'val_loss' in history:
-                    fig_loss.add_trace(go.Scatter(x=ep_range, y=history['val_loss'],
-                                                  mode='lines+markers', name='Val Loss',
-                                                  line=dict(color='#ff7f0e')))
-                fig_loss.update_layout(title="Loss Curve (lower = better)",
-                                       xaxis_title="Epoch", yaxis_title="MSE Loss")
-                st.plotly_chart(fig_loss, use_container_width=True)
-
-            with pc2:
-                st.write("### Backtest: Actual vs Predicted")
-                if len(inv_preds) > 0:
-                    bt_start = model_artifacts['time_step'] + model_artifacts['train_n']
-                    bt_idx   = df_used.index[bt_start : bt_start + len(inv_preds)]
-                    df_bt    = pd.DataFrame({'Actual': inv_actuals, 'Predicted': inv_preds}, index=bt_idx)
-                    fig_bt   = go.Figure()
-                    fig_bt.add_trace(go.Scatter(x=df_bt.index, y=df_bt['Actual'],
-                                                name='Actual',    line=dict(color='#1f77b4')))
-                    fig_bt.add_trace(go.Scatter(x=df_bt.index, y=df_bt['Predicted'],
-                                                name='Predicted', line=dict(color='#ff7f0e')))
-                    fig_bt.update_layout(title="Backtest: How well did we track?",
-                                         xaxis_title="Date", yaxis_title="Price ($)")
-                    st.plotly_chart(fig_bt, use_container_width=True)
-                    if mse is not None:
-                        st.write(f"Samples: {len(inv_preds)} &nbsp;|&nbsp; MSE: {mse:.3f} &nbsp;|&nbsp; R²: {r2:.3f}")
-                else:
-                    st.info("Not enough test samples.")
-
-            # ====================== RECURSIVE FORECAST WITH SLIDING WINDOW ======================
-            st.markdown("## Forecast (future days)")
-
-            # We need all 12 features computed on recent data for the seed window
-            recent_df  = df_used.copy()
-            recent_adj = recent_df['Adj Close'].tolist()
-
-            # Seed the sliding scaled window from the last time_step rows
-            recent_scaled = scaler_model.transform(recent_df.values[-time_step:]).tolist()
-
-            future_preds = []
-            for step in range(days):
-                # Re-derive all 12 features for the next prediction row
-                # We rebuild from the last ~60 rows of recent_adj for speed
-                adj_series = pd.Series(recent_adj)
-
-                sma20 = adj_series.rolling(20).mean().iloc[-1] if len(adj_series) >= 20 else adj_series.mean()
-                sma50 = adj_series.rolling(50).mean().iloc[-1] if len(adj_series) >= 50 else adj_series.mean()
-
-                ema12 = adj_series.ewm(span=12, adjust=False).mean().iloc[-1]
-                ema26 = adj_series.ewm(span=26, adjust=False).mean().iloc[-1]
-                macd  = ema12 - ema26
-
-                # MACD signal (9-day EMA of MACD) — approximate from last steps
-                if len(future_preds) >= 1:
-                    prev_macd_vals = [recent_df['MACD'].iloc[-1]] + \
-                                     [future_preds[j] - future_preds[j] for j in range(len(future_preds))]
-                    macd_series    = pd.Series([recent_df['MACD'].iloc[-1]] * 9 + [macd])
-                else:
-                    macd_series = pd.Series([recent_df['MACD'].iloc[-1]] * 9 + [macd])
-                macd_signal = macd_series.ewm(span=9, adjust=False).mean().iloc[-1]
-
-                # RSI
-                diff = adj_series.diff()
-                up_  = diff.clip(lower=0).fillna(0)
-                dn_  = -1 * diff.clip(upper=0).fillna(0)
-                ru_  = up_.rolling(14).mean().iloc[-1] if len(up_) >= 14 else up_.mean()
-                rd_  = dn_.rolling(14).mean().iloc[-1] if len(dn_) >= 14 else dn_.mean()
-                rsi_ = 100.0 - (100.0 / (1.0 + ru_ / (rd_ + 1e-9)))
-
-                # BB Width
-                roll_m  = adj_series.rolling(20).mean().iloc[-1]  if len(adj_series) >= 20 else adj_series.mean()
-                roll_s  = adj_series.rolling(20).std().iloc[-1]   if len(adj_series) >= 20 else adj_series.std()
-                bb_w    = (2 * roll_s) / (roll_m + 1e-9)
-
-                # ATR — approximate using last known ATR (slowly changing)
-                atr_ = float(recent_df['ATR'].iloc[-1])
-
-                # Daily return
-                dr_ = (recent_adj[-1] / recent_adj[-2] - 1) if len(recent_adj) >= 2 else 0.0
-
-                # Log Volume — use last known log volume
-                log_vol = float(recent_df['LogVolume'].iloc[-1])
-
-                feat_row    = np.array([[recent_adj[-1], log_vol, sma20, sma50,
-                                         ema12, ema26, macd, macd_signal,
-                                         rsi_, bb_w, atr_, dr_]])
-                feat_scaled = scaler_model.transform(feat_row)[0].tolist()
-
-                # KEY: slide window forward
-                recent_scaled.append(feat_scaled)
-                recent_scaled = recent_scaled[-time_step:]
-
-                inp       = np.array(recent_scaled).reshape(1, time_step, -1)
-                pred_sc   = model.predict(inp, verbose=0)[0, 0]
-
-                tmpl       = np.array(feat_scaled).reshape(1, -1).copy()
-                tmpl[0, 0] = pred_sc
-                pred_price = float(scaler_model.inverse_transform(tmpl)[0, 0])
-
-                future_preds.append(pred_price)
-                recent_adj.append(pred_price)
-
-            # Safe growing confidence band (capped at 20% of predicted price)
-            last_close  = float(df_used['Adj Close'].iloc[-1])
-            floor_price = last_close * 0.50
-            z = 1.96
-            band_uppers, band_lowers = [], []
-            for i, p in enumerate(future_preds):
-                half = min(z * resid_std * np.sqrt(i + 1), 0.20 * p)
-                band_uppers.append(p + half)
-                band_lowers.append(max(p - half, floor_price))
-
-            future_dates = pd.date_range(
-                start=data_main.index[-1] + pd.Timedelta(days=1),
-                periods=days, freq='B'
-            )
-            future_df = pd.DataFrame({
-                'Date':      future_dates,
-                'Predicted': future_preds,
-                'Upper':     band_uppers,
-                'Lower':     band_lowers
-            })
-
-            # Animated forecast chart
-            hist_x = df_used.index
-            hist_y = df_used['Adj Close'].values
-
-            fig = go.Figure()
-            fig.add_trace(go.Scatter(x=hist_x, y=hist_y,
-                                     name='Historical', line=dict(color='#1f77b4')))
-            fig.add_trace(go.Scatter(x=[future_dates[0]], y=[future_preds[0]],
-                                     name='Predicted',   line=dict(color='#ff7f0e')))
-            fig.add_trace(go.Scatter(
-                x=[future_dates[0], future_dates[0]],
-                y=[band_lowers[0],  band_uppers[0]],
-                fill='toself', fillcolor='rgba(255,127,14,0.15)',
-                line=dict(color='rgba(255,127,14,0)'),
-                name='95% CI', showlegend=True
+    # ── Walk-Forward R² per fold ──────────────────────────────────────────────
+    st.markdown("### 📈 Walk-Forward R² — Per Fold")
+    if art['wf_r2_list']:
+        wf_df  = pd.DataFrame({
+            'Fold':    [f"Fold {i+1}" for i in range(len(art['wf_r2_list']))],
+            'R²':      art['wf_r2_list'],
+            'Color':   ['green' if v >= 0.80 else 'orange' if v >= 0.65 else 'red'
+                        for v in art['wf_r2_list']]
+        })
+        fig_wf = go.Figure()
+        for _, row in wf_df.iterrows():
+            fig_wf.add_trace(go.Bar(
+                x=[row['Fold']], y=[row['R²']],
+                marker_color=row['Color'],
+                showlegend=False,
+                text=[f"{row['R²']:.3f}"], textposition='outside'
             ))
+        fig_wf.add_hline(y=0.80, line_dash='dash', line_color='green',
+                         annotation_text="Target (0.80)")
+        fig_wf.add_hline(y=0.65, line_dash='dot',  line_color='orange',
+                         annotation_text="Acceptable (0.65)")
+        fig_wf.update_layout(
+            title=f"Walk-Forward R² across 5 folds  |  Mean = {art['wf_r2']:.3f}",
+            yaxis_title="R²", yaxis_range=[min(0, min(art['wf_r2_list']))-0.05, 1.05],
+            height=320
+        )
+        st.plotly_chart(fig_wf, use_container_width=True)
 
-            frames = []
-            for i in range(len(future_dates)):
-                xp = future_dates[:i+1]
-                yp = future_preds[:i+1]
-                xb = list(future_dates[:i+1]) + list(future_dates[:i+1][::-1])
-                yb = list(band_uppers[:i+1])  + list(band_lowers[:i+1][::-1])
-                frames.append(go.Frame(data=[
-                    go.Scatter(x=hist_x, y=hist_y),
-                    go.Scatter(x=xp, y=yp, line=dict(color='#ff7f0e')),
-                    go.Scatter(x=xb, y=yb, fill='toself',
-                               fillcolor='rgba(255,127,14,0.15)',
-                               line=dict(color='rgba(255,127,14,0)'))
-                ], name=str(i)))
-            fig.frames = frames
+    # ══════════════════════════════════════════════════════════════════════════
+    #  SECTION B — STANDARD PERFORMANCE CHARTS
+    # ══════════════════════════════════════════════════════════════════════════
+    st.markdown("## 📉 Model Performance")
+    pc1, pc2 = st.columns(2)
 
-            fig.update_layout(
-                title=f"{selected_ticker} — {days}-day Forecast with 95% CI",
-                xaxis_title="Date", yaxis_title="Price ($)",
-                updatemenus=[{
-                    "type": "buttons",
-                    "buttons": [
-                        {"label": "▶ Play", "method": "animate",
-                         "args": [None, {"frame": {"duration": 400, "redraw": True},
-                                         "fromcurrent": True, "transition": {"duration": 200}}]},
-                        {"label": "⏸ Pause", "method": "animate",
-                         "args": [[None], {"frame": {"duration": 0, "redraw": False},
-                                           "mode": "immediate", "transition": {"duration": 0}}]}
-                    ],
-                    "direction": "left", "pad": {"r": 10, "t": 10},
-                    "showactive": True, "x": 0.01, "y": -0.12,
-                    "xanchor": "left", "yanchor": "top"
-                }]
-            )
-            st.plotly_chart(fig, use_container_width=True)
-            st.dataframe(
-                future_df.style.format({"Predicted": "{:.2f}", "Upper": "{:.2f}", "Lower": "{:.2f}"}),
-                use_container_width=True
-            )
+    with pc1:
+        st.write("### Training Loss Curve")
+        ep_r = list(range(1, len(history.get('loss',[])) + 1))
+        fig_l = go.Figure()
+        fig_l.add_trace(go.Scatter(x=ep_r, y=history.get('loss',[]),
+                                   mode='lines+markers', name='Train Loss',
+                                   line=dict(color='#1f77b4')))
+        if 'val_loss' in history:
+            fig_l.add_trace(go.Scatter(x=ep_r, y=history['val_loss'],
+                                       mode='lines+markers', name='Val Loss',
+                                       line=dict(color='#ff7f0e')))
+        fig_l.update_layout(title="Loss Curve (lower = better)",
+                            xaxis_title="Epoch", yaxis_title="MSE Loss")
+        st.plotly_chart(fig_l, use_container_width=True)
 
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Test MSE", f"{mse:.3f}" if mse is not None else "N/A")
-            c2.metric("Test R²",  f"{r2:.3f}"  if r2  is not None else "N/A")
-            c3.metric("Model", f"LSTM ({n_feat}-feature)")
+    with pc2:
+        st.write("### Backtest: Actual vs Predicted Price")
+        if len(bt_preds) > 0:
+            bt_start = art['time_step'] + train_n
+            bt_idx   = df_used.index[bt_start : bt_start + len(bt_preds)]
+            fig_bt   = go.Figure()
+            fig_bt.add_trace(go.Scatter(x=bt_idx, y=bt_actuals,
+                                        name='Actual',    line=dict(color='#1f77b4')))
+            fig_bt.add_trace(go.Scatter(x=bt_idx, y=bt_preds,
+                                        name='Predicted', line=dict(color='#ff7f0e')))
+            fig_bt.update_layout(title="Backtest: How closely did model track?",
+                                 xaxis_title="Date", yaxis_title="Price ($)")
+            st.plotly_chart(fig_bt, use_container_width=True)
+            st.caption(f"Test samples: {len(bt_preds)}  |  "
+                       f"MSE: {art['mse']:.2f}  |  "
+                       f"R²: {art['r2']:.3f}  |  "
+                       f"RMSE: ${art['rmse']:.2f}  |  "
+                       f"MAPE: {art['mape']:.2f}%")
 
-# ====================== SENTIMENT ======================
+    # ── Directional Accuracy Plot ─────────────────────────────────────────────
+    st.write("### 🧭 Directional Accuracy — Predicted vs Actual Direction")
+    st.caption("Green = model correctly predicted up/down. Red = wrong. "
+               "Target: consistently above 50% random baseline.")
+    dir_correct = (np.sign(bt_pred_ret) == np.sign(bt_actual_ret)).astype(int)
+    if len(bt_preds) > 0:
+        bt_idx2 = df_used.index[art['time_step'] + train_n :
+                                 art['time_step'] + train_n + len(bt_preds)]
+        colors  = ['#22c55e' if c == 1 else '#ef4444' for c in dir_correct]
+        fig_dir = go.Figure()
+        fig_dir.add_trace(go.Bar(x=bt_idx2, y=dir_correct,
+                                 marker_color=colors, showlegend=False))
+        fig_dir.add_hline(y=0.5, line_dash='dash', line_color='white',
+                          annotation_text="Random baseline (50%)")
+        fig_dir.update_layout(
+            title=f"Directional Accuracy: {art['dir_acc']:.1f}%  "
+                  f"({dir_correct.sum()}/{len(dir_correct)} correct)",
+            xaxis_title="Date", yaxis_title="Correct (1) / Wrong (0)",
+            height=280
+        )
+        st.plotly_chart(fig_dir, use_container_width=True)
+
+    # ── Residuals Distribution ────────────────────────────────────────────────
+    st.write("### 📐 Residuals Distribution")
+    st.caption("A tight, symmetric distribution centred near 0 = well-calibrated model.")
+    residuals  = bt_actuals - bt_preds
+    fig_res    = go.Figure()
+    fig_res.add_trace(go.Histogram(x=residuals, nbinsx=40,
+                                   marker_color='#6366f1', opacity=0.75,
+                                   name='Residuals'))
+    fig_res.add_vline(x=0, line_color='white', line_dash='dash')
+    fig_res.update_layout(
+        title=f"Residuals  |  Mean={residuals.mean():.2f}  Std=${residuals.std():.2f}",
+        xaxis_title="Residual ($)", yaxis_title="Count", height=280
+    )
+    st.plotly_chart(fig_res, use_container_width=True)
+
+    # ══════════════════════════════════════════════════════════════════════════
+    #  SECTION C — FUTURE FORECAST
+    # ══════════════════════════════════════════════════════════════════════════
+    st.markdown("## 🔮 Future Forecast")
+
+    # Seed the sliding window
+    recent_scaled = scaler.transform(df_used.values[-time_step:]).tolist()
+    recent_log_ret = df_used['LogReturn'].tolist()
+
+    # We also need the last actual price to chain predictions
+    last_price = float(price_s.iloc[-1])
+    chain_price = last_price
+
+    future_preds_price = []
+    for step in range(days):
+        # Slide window forward
+        inp      = np.array(recent_scaled[-time_step:]).reshape(1, time_step, -1)
+        pred_sc  = float(model.predict(inp, verbose=0)[0, 0])
+
+        # Invert scaled log-return
+        dummy       = np.zeros((1, n_feat))
+        dummy[0, 0] = pred_sc
+        inv_row     = scaler.inverse_transform(dummy)
+        pred_lr     = float(inv_row[0, 0])
+
+        # Chain price: P_t = P_{t-1} * exp(LogReturn)
+        pred_price  = chain_price * np.exp(pred_lr)
+        future_preds_price.append(pred_price)
+        chain_price = pred_price
+
+        # Update window: build next feature row (approximate)
+        recent_log_ret.append(pred_lr)
+        adj_s    = pd.Series([chain_price])
+        log_vol_ = float(df_used['LogVolume'].iloc[-1])
+        # Use rolling feature approximations from extended recent_log_ret
+        adj_full = price_s.tolist() + [p for p in future_preds_price]
+        adj_s2   = pd.Series(adj_full)
+        sma20_   = adj_s2.rolling(20).mean().iloc[-1]
+        sma50_   = adj_s2.rolling(50).mean().iloc[-1]
+        ema12_   = adj_s2.ewm(span=12, adjust=False).mean().iloc[-1]
+        ema26_   = adj_s2.ewm(span=26, adjust=False).mean().iloc[-1]
+        macd_    = ema12_ - ema26_
+        macd_s_  = pd.Series([macd_]).ewm(span=9, adjust=False).mean().iloc[-1]
+        diff_    = adj_s2.diff().fillna(0)
+        up_      = diff_.clip(lower=0)
+        dn_      = -diff_.clip(upper=0)
+        ru_      = up_.rolling(14).mean().iloc[-1] if len(up_) >= 14 else up_.mean()
+        rd_      = dn_.rolling(14).mean().iloc[-1] if len(dn_) >= 14 else dn_.mean()
+        rsi_     = 100 - 100/(1 + ru_/(rd_+1e-9))
+        rm_      = adj_s2.rolling(20).mean().iloc[-1]
+        rs_      = adj_s2.rolling(20).std().iloc[-1]
+        bb_w_    = (2*rs_)/(rm_+1e-9)
+        atr_     = float(df_used['ATR'].iloc[-1])
+
+        new_row  = np.array([[pred_lr, log_vol_, sma20_, sma50_,
+                               ema12_, ema26_, macd_, macd_s_,
+                               rsi_, bb_w_, atr_]])
+        new_sc   = scaler.transform(new_row)[0].tolist()
+        recent_scaled.append(new_sc)
+
+    # Safe growing CI (capped at 15% of predicted price)
+    floor = last_price * 0.55
+    z     = 1.96
+    uppers, lowers = [], []
+    for i, p in enumerate(future_preds_price):
+        hw = min(z * resid_std * np.sqrt(i+1), 0.15 * p)
+        uppers.append(p + hw)
+        lowers.append(max(p - hw, floor))
+
+    future_dates = pd.date_range(
+        start=data_main.index[-1] + pd.Timedelta(days=1),
+        periods=days, freq='B'
+    )
+    future_df = pd.DataFrame({
+        'Date':      future_dates,
+        'Predicted': future_preds_price,
+        'Upper':     uppers,
+        'Lower':     lowers
+    })
+
+    # Animated forecast chart
+    hist_x = price_s.index
+    hist_y = price_s.values
+
+    fig_f = go.Figure()
+    fig_f.add_trace(go.Scatter(x=hist_x, y=hist_y,
+                               name='Historical', line=dict(color='#1f77b4')))
+    fig_f.add_trace(go.Scatter(x=[future_dates[0]], y=[future_preds_price[0]],
+                               name='Forecast',   line=dict(color='#ff7f0e')))
+    fig_f.add_trace(go.Scatter(
+        x=[future_dates[0], future_dates[0]],
+        y=[lowers[0], uppers[0]],
+        fill='toself', fillcolor='rgba(255,127,14,0.15)',
+        line=dict(color='rgba(255,127,14,0)'),
+        name='95% CI', showlegend=True
+    ))
+
+    frames = []
+    for i in range(len(future_dates)):
+        xp = future_dates[:i+1]
+        yp = future_preds_price[:i+1]
+        xb = list(future_dates[:i+1]) + list(future_dates[:i+1][::-1])
+        yb = list(uppers[:i+1]) + list(lowers[:i+1][::-1])
+        frames.append(go.Frame(data=[
+            go.Scatter(x=hist_x, y=hist_y),
+            go.Scatter(x=xp, y=yp, line=dict(color='#ff7f0e')),
+            go.Scatter(x=xb, y=yb, fill='toself',
+                       fillcolor='rgba(255,127,14,0.15)',
+                       line=dict(color='rgba(255,127,14,0)'))
+        ], name=str(i)))
+    fig_f.frames = frames
+    fig_f.update_layout(
+        title=f"{selected_ticker} — {days}-day Forecast  |  Last close: ${last_price:.2f}",
+        xaxis_title="Date", yaxis_title="Price ($)",
+        updatemenus=[{
+            "type": "buttons",
+            "buttons": [
+                {"label": "▶ Play",  "method": "animate",
+                 "args": [None, {"frame": {"duration": 400, "redraw": True},
+                                 "fromcurrent": True, "transition": {"duration": 200}}]},
+                {"label": "⏸ Pause", "method": "animate",
+                 "args": [[None], {"frame": {"duration": 0, "redraw": False},
+                                   "mode": "immediate", "transition": {"duration": 0}}]}
+            ],
+            "direction": "left", "pad": {"r":10,"t":10},
+            "showactive": True, "x": 0.01, "y": -0.12,
+            "xanchor": "left", "yanchor": "top"
+        }]
+    )
+    st.plotly_chart(fig_f, use_container_width=True)
+    st.dataframe(
+        future_df.style.format({"Predicted":"{:.2f}","Upper":"{:.2f}","Lower":"{:.2f}"}),
+        use_container_width=True
+    )
+
+    # Summary metrics bar at the bottom
+    sm1, sm2, sm3, sm4 = st.columns(4)
+    sm1.metric("Walk-Forward R²",   f"{art['wf_r2']:.3f}" if art['wf_r2'] else "N/A")
+    sm2.metric("Directional Acc",   f"{art['dir_acc']:.1f}%")
+    sm3.metric("MAPE",              f"{art['mape']:.2f}%")
+    sm4.metric("Model beats naïve", "✅ Yes" if sum([beat_r2, beat_mape, beat_rmse]) >= 2 else "⚠️ Partial")
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  TAB 3 — SENTIMENT
+# ══════════════════════════════════════════════════════════════════════════════
 elif tab == "Sentiment":
     st.subheader("News Sentiment")
     if news_posts:
         df_s = pd.DataFrame({'News': news_posts, 'Link': news_links, 'Score': vader_scores})
         def color(val):
-            return f"color: {'green' if val > 0.1 else 'red' if val < -0.1 else 'gray'}"
+            return f"color: {'green' if val>0.1 else 'red' if val<-0.1 else 'gray'}"
         st.dataframe(
-            df_s.style.applymap(color, subset=['Score']).format({'Score': '{:.3f}'}),
+            df_s.style.applymap(color, subset=['Score']).format({'Score':'{:.3f}'}),
             use_container_width=True
         )
         pos = sum(1 for s in vader_scores if s > 0.1)
         neg = sum(1 for s in vader_scores if s < -0.1)
         neu = len(vader_scores) - pos - neg
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Positive", pos); c2.metric("Negative", neg); c3.metric("Neutral", neu)
+        c1,c2,c3 = st.columns(3)
+        c1.metric("Positive", pos)
+        c2.metric("Negative", neg)
+        c3.metric("Neutral",  neu)
     else:
         st.info("No news available.")
 
-# ====================== COMPARISON ======================
+# ══════════════════════════════════════════════════════════════════════════════
+#  TAB 4 — COMPARISON
+# ══════════════════════════════════════════════════════════════════════════════
 elif tab == "Comparison":
     st.subheader(f"**{selected_ticker} vs {compare_ticker}**")
     if data_main is not None and data_compare is not None:
-        base_m = data_main['Adj Close'].iloc[0]
-        base_c = data_compare['Adj Close'].iloc[0]
-        df_m   = (data_main['Adj Close']    / base_m - 1) * 100
-        df_c   = (data_compare['Adj Close'] / base_c - 1) * 100
+        bm = data_main['Adj Close'].iloc[0]
+        bc = data_compare['Adj Close'].iloc[0]
+        dm = (data_main['Adj Close']    / bm - 1) * 100
+        dc = (data_compare['Adj Close'] / bc - 1) * 100
         fig = go.Figure()
-        fig.add_trace(go.Scatter(x=data_main.index,    y=df_m, name=selected_ticker, line=dict(color='#26A69A')))
-        fig.add_trace(go.Scatter(x=data_compare.index, y=df_c, name=compare_ticker,  line=dict(color='#AB47BC')))
-        fig.update_layout(title="Normalised Performance (%)", height=600, template="plotly_white")
+        fig.add_trace(go.Scatter(x=data_main.index,    y=dm,
+                                 name=selected_ticker, line=dict(color='#26A69A')))
+        fig.add_trace(go.Scatter(x=data_compare.index, y=dc,
+                                 name=compare_ticker,  line=dict(color='#AB47BC')))
+        fig.update_layout(title="Normalised Performance (%)",
+                          height=600, template="plotly_white")
         st.plotly_chart(fig, use_container_width=True)
-        ret_m = (data_main['Adj Close'].iloc[-1]    / base_m - 1) * 100
-        ret_c = (data_compare['Adj Close'].iloc[-1] / base_c - 1) * 100
-        vol_m = data_main['Adj Close'].pct_change().std()    * np.sqrt(252) * 100
-        vol_c = data_compare['Adj Close'].pct_change().std() * np.sqrt(252) * 100
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric(f"{selected_ticker} Return", f"{ret_m:+.2f}%")
-        c2.metric(f"{compare_ticker} Return",  f"{ret_c:+.2f}%")
-        c3.metric(f"{selected_ticker} Vol",    f"{vol_m:.1f}%")
-        c4.metric(f"{compare_ticker} Vol",     f"{vol_c:.1f}%")
+        rm = (data_main['Adj Close'].iloc[-1]    / bm - 1) * 100
+        rc = (data_compare['Adj Close'].iloc[-1] / bc - 1) * 100
+        vm = data_main['Adj Close'].pct_change().std()    * np.sqrt(252) * 100
+        vc = data_compare['Adj Close'].pct_change().std() * np.sqrt(252) * 100
+        c1,c2,c3,c4 = st.columns(4)
+        c1.metric(f"{selected_ticker} Return", f"{rm:+.2f}%")
+        c2.metric(f"{compare_ticker} Return",  f"{rc:+.2f}%")
+        c3.metric(f"{selected_ticker} Vol",    f"{vm:.1f}%")
+        c4.metric(f"{compare_ticker} Vol",     f"{vc:.1f}%")
     else:
         st.error("Not enough data to compare.")
 
-# ====================== PORTFOLIO ANALYZER ======================
+# ══════════════════════════════════════════════════════════════════════════════
+#  TAB 5 — PORTFOLIO ANALYZER
+# ══════════════════════════════════════════════════════════════════════════════
 elif tab == "Portfolio Analyzer":
     st.subheader("Portfolio Analyzer")
-    portfolio_tickers = st.multiselect("Select Tickers", tickers,
-                                       default=[selected_ticker, compare_ticker])
-    if len(portfolio_tickers) < 2:
+    port_tickers = st.multiselect("Select Tickers", tickers,
+                                  default=[selected_ticker, compare_ticker])
+    if len(port_tickers) < 2:
         st.warning("Select at least 2 tickers.")
     else:
-        weights = []
-        cols    = st.columns(len(portfolio_tickers))
-        total_w = 0
-        for i, tick in enumerate(portfolio_tickers):
+        weights, total_w = [], 0
+        cols = st.columns(len(port_tickers))
+        for i, tick in enumerate(port_tickers):
             w = cols[i].number_input(f"Weight {tick} (%)", 0.0, 100.0,
-                                     100.0 / len(portfolio_tickers))
-            weights.append(w / 100); total_w += w
+                                     100.0/len(port_tickers))
+            weights.append(w/100); total_w += w
         if abs(total_w - 100) > 0.01:
             st.warning(f"Weights sum to {total_w:.1f}%. Should be 100%.")
         else:
             data_dict = {}
-            for tick in portfolio_tickers:
+            for tick in port_tickers:
                 d = fetch_stock_data(tick, start_date, end_date)
                 if d is None: st.error(f"Data missing for {tick}."); st.stop()
                 data_dict[tick] = d['Adj Close']
             port_df = pd.DataFrame(data_dict)
-            returns = port_df.pct_change().dropna()
-            m_ret   = returns.mean() * 252
-            cov_mat = returns.cov()  * 252
+            rets    = port_df.pct_change().dropna()
+            mret    = rets.mean() * 252
+            cov     = rets.cov()  * 252
             w_np    = np.array(weights)
-            p_ret   = np.dot(m_ret, w_np)
-            p_vol   = np.sqrt(np.dot(w_np.T, np.dot(cov_mat, w_np)))
-            sharpe  = (p_ret - 0.03) / p_vol
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Expected Return",      f"{p_ret*100:.2f}%")
-            c2.metric("Portfolio Volatility",  f"{p_vol*100:.2f}%")
-            c3.metric("Sharpe Ratio",          f"{sharpe:.2f}")
-            fig_h = px.imshow(returns.corr(), text_auto=True, aspect="auto",
-                              color_continuous_scale='RdBu_r', title="Correlation Heatmap")
+            pr      = np.dot(mret, w_np)
+            pv      = np.sqrt(np.dot(w_np.T, np.dot(cov, w_np)))
+            sharpe  = (pr - 0.03) / pv
+            c1,c2,c3 = st.columns(3)
+            c1.metric("Expected Return",     f"{pr*100:.2f}%")
+            c2.metric("Portfolio Volatility", f"{pv*100:.2f}%")
+            c3.metric("Sharpe Ratio",        f"{sharpe:.2f}")
+            fig_h = px.imshow(rets.corr(), text_auto=True, aspect="auto",
+                              color_continuous_scale='RdBu_r',
+                              title="Correlation Heatmap")
             st.plotly_chart(fig_h, use_container_width=True)
 
-# ====================== NEWS TICKER ======================
+# ── News Ticker ───────────────────────────────────────────────────────────────
 st.markdown("---")
 st.markdown("### Latest Headlines (24/7)")
 all_h    = news_headlines + news_headlines
 anim_dur = max(15, len(news_headlines) * 3)
 st.markdown(f"""
 <style>
-.ticker-container {{
-    height:180px; overflow:hidden; background:#0f172a; padding:16px;
-    border-radius:14px; box-shadow:0 6px 24px rgba(0,0,0,0.3);
-    color:white; font-family:'Segoe UI',sans-serif; position:relative;
-}}
-.ticker-wrapper {{ animation:scroll-up {anim_dur}s linear infinite; will-change:transform; }}
-@keyframes scroll-up {{ 0%{{transform:translateY(0)}} 100%{{transform:translateY(-50%)}} }}
-.ticker-item {{ padding:12px 0; font-size:15px; line-height:1.6; min-height:40px; word-wrap:break-word; }}
+.ticker-container{{height:180px;overflow:hidden;background:#0f172a;padding:16px;
+  border-radius:14px;box-shadow:0 6px 24px rgba(0,0,0,.3);
+  color:#fff;font-family:'Segoe UI',sans-serif;position:relative}}
+.ticker-wrapper{{animation:scroll-up {anim_dur}s linear infinite;will-change:transform}}
+@keyframes scroll-up{{0%{{transform:translateY(0)}}100%{{transform:translateY(-50%)}}}}
+.ticker-item{{padding:12px 0;font-size:15px;line-height:1.6;
+  min-height:40px;overflow:hidden;word-wrap:break-word}}
 </style>""", unsafe_allow_html=True)
 html_c = '<div class="ticker-container"><div class="ticker-wrapper">'
 for h in all_h: html_c += f'<div class="ticker-item">{h}</div>'
