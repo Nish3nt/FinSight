@@ -249,19 +249,6 @@ finsight/
 
 ---
 
-## 📸 Screenshots
-
-### Model Evaluation Dashboard
-> Walk-Forward R², Directional Accuracy, MAPE, RMSE, and Naïve Baseline comparison — all in one view.
-
-### Backtest Chart
-> Side-by-side actual vs predicted prices over the held-out 20% test period.
-
-### Animated Forecast
-> 7-day animated price forecast with growing 95% confidence intervals.
-
-### Portfolio Analyzer
-> Multi-stock portfolio with Sharpe Ratio, volatility, and correlation heatmap.
 
 ---
 
