@@ -1,7 +1,8 @@
 # =============================================================================
-#  FinSight — app.py  (FIXED — f-string formatting bug resolved)
+#  FinSight — app.py
 #  Model  : Multi-feature LSTM  |  Target : Log Returns
 #  Eval   : Walk-Forward R², Directional Accuracy, MAPE, RMSE, Naïve Baseline
+#  LLM    : Anthropic Claude — Predictions analysis + Comparison analysis
 # =============================================================================
 
 import streamlit as st
@@ -21,6 +22,8 @@ from tensorflow.keras.optimizers import Adam
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.metrics import mean_squared_error, r2_score
 import time
+import json
+import anthropic
 from streamlit_option_menu import option_menu
 
 # ── Initial Setup ─────────────────────────────────────────────────────────────
@@ -29,6 +32,23 @@ sia          = SentimentIntensityAnalyzer()
 current_date = datetime.now().date()
 st.set_page_config(page_title="FinSight", layout="wide")
 
+# ── Anthropic Client ──────────────────────────────────────────────────────────
+ANTHROPIC_API_KEY = "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"
+_claude = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+
+def call_claude(prompt: str, max_tokens: int = 800) -> str:
+    """Call Claude and return plain text response. Never raises — returns error string."""
+    try:
+        msg = _claude.messages.create(
+            model="claude-sonnet-4-5",
+            max_tokens=max_tokens,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return msg.content[0].text.strip()
+    except Exception as e:
+        return f"⚠️ LLM unavailable: {e}"
+
+# ── CSS ───────────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
 [data-testid="stSidebar"]>div:first-child{background:#0b1220;padding:16px 12px}
@@ -51,6 +71,16 @@ st.markdown("""
 @keyframes shimmer{0%{background-position:200% 0}100%{background-position:-200% 0}}
 .baseline-box{background:#0f172a;border:1px solid #1e293b;
               border-radius:10px;padding:14px;margin-bottom:6px}
+.llm-box{background:#0a1628;border:1px solid #1e3a5f;border-radius:12px;
+         padding:20px 24px;margin-top:16px;margin-bottom:8px;
+         font-size:14px;line-height:1.8;color:#e2e8f0}
+.llm-header{font-size:13px;font-weight:700;color:#38bdf8;
+            letter-spacing:1px;margin-bottom:12px;text-transform:uppercase}
+.llm-bullet{padding:6px 0;border-bottom:1px solid #1e2d42;color:#cbd5e1}
+.llm-bullet:last-child{border-bottom:none}
+.llm-tag{display:inline-block;background:#1e3a5f;color:#38bdf8;
+         border-radius:4px;padding:1px 8px;font-size:11px;
+         font-weight:700;margin-right:6px}
 </style>
 """, unsafe_allow_html=True)
 
@@ -172,10 +202,6 @@ data_compare = fetch_stock_data(compare_ticker,  start_date, end_date)
 
 # ── Feature Engineering (11 features) ────────────────────────────────────────
 def compute_features(raw):
-    """
-    Returns (feature_df, price_series).
-    Column 0 of feature_df = LogReturn  (model target — stationary & unbiased).
-    """
     df = raw.copy()
     df['LogReturn']   = np.log(df['Adj Close'] / df['Adj Close'].shift(1))
     df['SMA20']       = df['Adj Close'].rolling(20).mean()
@@ -196,7 +222,6 @@ def compute_features(raw):
     lc                = (df['Low']  - df['Adj Close'].shift()).abs()
     df['ATR']         = pd.concat([hl, hc, lc], axis=1).max(axis=1).rolling(14).mean()
     df['LogVolume']   = np.log1p(df['Volume'])
-
     feature_cols = [
         'LogReturn', 'LogVolume',
         'SMA20', 'SMA50', 'EMA12', 'EMA26',
@@ -282,11 +307,10 @@ elif tab == "Predictions":
         scaled = scaler.fit_transform(df_feat.values)
         prices_arr = price_s.loc[df_feat.index].values
 
-        # Sequences
         X, y = [], []
         for i in range(len(scaled) - time_step):
             X.append(scaled[i:i + time_step, :])
-            y.append(scaled[i + time_step, 0])   # LogReturn col=0
+            y.append(scaled[i + time_step, 0])
         X = np.array(X)
         y = np.array(y)
 
@@ -296,7 +320,6 @@ elif tab == "Predictions":
         X_te, y_te = X[train_n:], y[train_n:]
         n_feat  = X.shape[2]
 
-        # Model
         model = Sequential([
             LSTM(128, return_sequences=True, input_shape=(time_step, n_feat)),
             Dropout(0.2),
@@ -322,23 +345,19 @@ elif tab == "Predictions":
                             validation_split=val_split,
                             callbacks=cbs, verbose=0)
 
-        # Backtest — reconstruct price from predicted log-return
         bt_preds_p, bt_actuals_p   = [], []
         bt_pred_ret, bt_actual_ret = [], []
         dummy_row = np.zeros((1, n_feat))
 
         for i in range(len(X_te)):
             global_idx = time_step + train_n + i
-
             pred_sc        = float(model.predict(X_te[i:i+1], verbose=0)[0, 0])
             dummy_row[0, 0] = pred_sc
             pred_lr        = float(scaler.inverse_transform(dummy_row)[0, 0])
             actual_lr      = float(df_feat['LogReturn'].iloc[global_idx])
-
             prev_price  = float(price_s.iloc[global_idx - 1])
             pred_price  = prev_price * np.exp(pred_lr)
             actual_price= float(price_s.iloc[global_idx])
-
             bt_preds_p.append(pred_price)
             bt_actuals_p.append(actual_price)
             bt_pred_ret.append(pred_lr)
@@ -349,7 +368,6 @@ elif tab == "Predictions":
         bt_pred_ret  = np.array(bt_pred_ret)
         bt_actual_ret= np.array(bt_actual_ret)
 
-        # Walk-Forward R² (5 folds)
         wf_r2_list = []
         fold_size  = max(10, len(bt_preds_p) // 5)
         for fold in range(5):
@@ -359,7 +377,6 @@ elif tab == "Predictions":
             wf_r2_list.append(float(r2_score(bt_actuals_p[s:e], bt_preds_p[s:e])))
         wf_r2 = float(np.mean(wf_r2_list)) if wf_r2_list else 0.0
 
-        # Standard metrics
         mse_val  = float(mean_squared_error(bt_actuals_p, bt_preds_p))
         r2_val   = float(r2_score(bt_actuals_p, bt_preds_p))
         rmse_val = float(np.sqrt(mse_val))
@@ -367,10 +384,8 @@ elif tab == "Predictions":
             (bt_actuals_p - bt_preds_p) / (np.abs(bt_actuals_p) + 1e-9)
         )) * 100)
 
-        # Directional accuracy
         dir_acc = float(np.mean(np.sign(bt_pred_ret) == np.sign(bt_actual_ret)) * 100)
 
-        # Naïve baseline
         naive_p  = bt_actuals_p[:-1]
         naive_a  = bt_actuals_p[1:]
         naive_r2   = float(r2_score(naive_a, naive_p))
@@ -458,13 +473,11 @@ elif tab == "Predictions":
     st.markdown("## 📊 Model Evaluation Dashboard")
     st.caption("Industry-standard metrics used by quant teams and ML practitioners.")
 
-    # Helper: colour class
     def ccls(val, good_t, warn_t, higher=True):
         if higher:
             return "good" if val >= good_t else "warn" if val >= warn_t else "bad"
         return "good" if val <= good_t else "warn" if val <= warn_t else "bad"
 
-    # ── Pre-format metric strings (avoids f-string conditional formatting bug) ─
     wf_r2_str  = f"{art['wf_r2']:.3f}"
     r2_str     = f"{art['r2']:.3f}"
     da_str     = f"{art['dir_acc']:.1f}%"
@@ -524,7 +537,6 @@ elif tab == "Predictions":
     beat_rmse = art['rmse'] < art['naive_rmse']
     wins      = sum([beat_r2, beat_mape, beat_rmse])
 
-    # Pre-format baseline strings
     lstm_r2_str    = f"{art['r2']:.3f}"
     naive_r2_str   = f"{art['naive_r2']:.3f}"
     lstm_mape_str  = f"{art['mape']:.2f}%"
@@ -698,7 +710,6 @@ elif tab == "Predictions":
     for step in range(days):
         inp     = np.array(recent_scaled[-time_step:]).reshape(1, time_step, -1)
         pred_sc = float(model.predict(inp, verbose=0)[0, 0])
-
         dummy_f[0, 0] = pred_sc
         pred_lr       = float(scaler.inverse_transform(dummy_f)[0, 0])
         pred_price    = chain_price * np.exp(pred_lr)
@@ -706,7 +717,6 @@ elif tab == "Predictions":
         chain_price = pred_price
         price_list.append(pred_price)
 
-        # Rebuild next feature row from extended price list
         adj_s    = pd.Series(price_list)
         log_vol_ = float(df_used['LogVolume'].iloc[-1])
         sma20_   = adj_s.rolling(20).mean().iloc[-1]
@@ -724,7 +734,7 @@ elif tab == "Predictions":
         rd_      = dn_.rolling(14).mean().iloc[-1] if len(dn_) >= 14 else dn_.mean()
         rsi_     = 100 - 100 / (1 + ru_ / (rd_ + 1e-9))
         rm_      = adj_s.rolling(20).mean().iloc[-1]
-        rs_      = adj_s.rolling(20).std().iloc[-1]  if len(adj_s) >= 20 else adj_s.std()
+        rs_      = adj_s.rolling(20).std().iloc[-1] if len(adj_s) >= 20 else adj_s.std()
         bb_w_    = (2 * rs_) / (rm_ + 1e-9)
         atr_     = float(df_used['ATR'].iloc[-1])
 
@@ -734,7 +744,6 @@ elif tab == "Predictions":
         new_sc  = scaler.transform(new_row)[0].tolist()
         recent_scaled.append(new_sc)
 
-    # Safe growing CI (capped at 15% of predicted price)
     floor  = last_price * 0.55
     z      = 1.96
     uppers, lowers = [], []
@@ -817,12 +826,88 @@ elif tab == "Predictions":
         use_container_width=True
     )
 
-    # Summary footer
+    # Summary footer metrics
     sm1, sm2, sm3, sm4 = st.columns(4)
     sm1.metric("Walk-Forward R²",  wf_r2_str)
     sm2.metric("Directional Acc",  da_str)
     sm3.metric("MAPE",             mape_str)
     sm4.metric("Beats Naïve",      "✅ Yes" if wins >= 2 else "⚠️ Partial")
+
+    # ══════════════════════════════════════════════════════════════════════════
+    #  SECTION D — 🤖 CLAUDE LLM ANALYSIS (PREDICTIONS)
+    # ══════════════════════════════════════════════════════════════════════════
+    st.markdown("---")
+    st.markdown("## 🤖 AI Expert Analysis — Predictions")
+    st.caption("Claude (Anthropic) interprets the model performance and forecast in plain English.")
+
+    final_price    = future_preds_price[-1]
+    price_change   = final_price - last_price
+    pct_change     = (price_change / last_price) * 100
+    direction      = "UPWARD" if price_change > 0 else "DOWNWARD"
+    wf_fold_str    = ", ".join([f"{v:.3f}" for v in art['wf_r2_list']])
+    sentiment_avg  = float(np.mean(vader_scores)) if vader_scores else 0.0
+    sentiment_label= "positive" if sentiment_avg > 0.1 else "negative" if sentiment_avg < -0.1 else "neutral"
+
+    pred_prompt = f"""You are a senior quantitative analyst at a hedge fund. Analyse the following 
+LSTM stock price prediction results for {selected_ticker} and provide a structured expert assessment.
+
+=== MODEL PERFORMANCE ===
+Walk-Forward R² (mean):    {art['wf_r2']:.4f}   (target > 0.80)
+Walk-Forward R² per fold:  {wf_fold_str}
+Standard R²:               {art['r2']:.4f}
+Directional Accuracy:      {art['dir_acc']:.1f}%  (random = 50%)
+MAPE:                      {art['mape']:.2f}%
+RMSE:                      ${art['rmse']:.2f}
+Residual Mean:             ${float(residuals.mean()):.2f}
+Residual Std:              ${float(residuals.std()):.2f}
+
+=== VS NAÏVE BASELINE ===
+LSTM R²    {art['r2']:.3f}  vs  Naïve {art['naive_r2']:.3f}  → {'LSTM WINS' if beat_r2 else 'NAIVE WINS'}
+LSTM MAPE  {art['mape']:.2f}%  vs  Naïve {art['naive_mape']:.2f}%  → {'LSTM WINS' if beat_mape else 'NAIVE WINS'}
+LSTM RMSE  ${art['rmse']:.2f}  vs  Naïve ${art['naive_rmse']:.2f}  → {'LSTM WINS' if beat_rmse else 'NAIVE WINS'}
+Overall wins: {wins}/3
+
+=== FORECAST ===
+Last close price:  ${last_price:.2f}
+{days}-day forecast: ${final_price:.2f}
+Expected move:     {price_change:+.2f} ({pct_change:+.2f}%)
+Direction:         {direction}
+95% CI at end:     ${lowers[-1]:.2f} – ${uppers[-1]:.2f}
+
+=== MARKET SENTIMENT (VADER on recent news) ===
+Average sentiment score: {sentiment_avg:.3f} ({sentiment_label})
+
+Write a structured analysis with exactly these 4 sections. Use clear headings:
+
+**1. MODEL RELIABILITY VERDICT**
+State clearly if this model is reliable for trading decisions. Reference the WF-R², directional 
+accuracy, and baseline comparison with specific numbers.
+
+**2. FORECAST INTERPRETATION**
+Explain what the {days}-day {direction} forecast of {pct_change:+.2f}% means practically. 
+Mention the confidence interval and what factors make this forecast trustworthy or uncertain.
+
+**3. RISK FACTORS**
+List 3–4 specific risks an investor must know before acting on this forecast. Reference MAPE, 
+residual std, and any fold inconsistencies you see in the WF-R² list.
+
+**4. ACTIONABLE RECOMMENDATION**
+Give a clear, specific recommendation (not generic advice). What should someone holding or 
+watching {selected_ticker} do with this information? Consider sentiment.
+
+Be direct, specific, and use the actual numbers. Do not hedge everything into uselessness.
+"""
+
+    with st.spinner("Claude is analysing the model performance and forecast…"):
+        llm_pred_response = call_claude(pred_prompt, max_tokens=1000)
+
+    st.markdown(
+        f'<div class="llm-box">'
+        f'<div class="llm-header">🤖 Claude Analysis — {selected_ticker} Predictions</div>'
+        f'{llm_pred_response.replace(chr(10), "<br>")}'
+        f'</div>',
+        unsafe_allow_html=True
+    )
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  TAB 3 — SENTIMENT
@@ -857,6 +942,7 @@ elif tab == "Comparison":
         bc = data_compare['Adj Close'].iloc[0]
         dm = (data_main['Adj Close']    / bm - 1) * 100
         dc = (data_compare['Adj Close'] / bc - 1) * 100
+
         fig = go.Figure()
         fig.add_trace(go.Scatter(x=data_main.index,    y=dm,
                                  name=selected_ticker, line=dict(color='#26A69A')))
@@ -865,15 +951,161 @@ elif tab == "Comparison":
         fig.update_layout(title="Normalised Performance (%)",
                           height=600, template="plotly_white")
         st.plotly_chart(fig, use_container_width=True)
+
         rm = (data_main['Adj Close'].iloc[-1]    / bm - 1) * 100
         rc = (data_compare['Adj Close'].iloc[-1] / bc - 1) * 100
         vm = data_main['Adj Close'].pct_change().std()    * np.sqrt(252) * 100
         vc = data_compare['Adj Close'].pct_change().std() * np.sqrt(252) * 100
+
         c1, c2, c3, c4 = st.columns(4)
         c1.metric(f"{selected_ticker} Return", f"{rm:+.2f}%")
         c2.metric(f"{compare_ticker} Return",  f"{rc:+.2f}%")
         c3.metric(f"{selected_ticker} Vol",    f"{vm:.1f}%")
         c4.metric(f"{compare_ticker} Vol",     f"{vc:.1f}%")
+
+        # ── Extended comparison metrics ───────────────────────────────────────
+        st.markdown("### 📊 Extended Comparison Metrics")
+
+        rets_m = data_main['Adj Close'].pct_change().dropna()
+        rets_c = data_compare['Adj Close'].pct_change().dropna()
+
+        # Sharpe ratio (risk-free = 3%)
+        rf_daily    = 0.03 / 252
+        sharpe_m    = (rets_m.mean() - rf_daily) / (rets_m.std() + 1e-9) * np.sqrt(252)
+        sharpe_c    = (rets_c.mean() - rf_daily) / (rets_c.std() + 1e-9) * np.sqrt(252)
+
+        # Max drawdown
+        def max_drawdown(price_series):
+            roll_max = price_series.cummax()
+            drawdown = (price_series - roll_max) / (roll_max + 1e-9)
+            return float(drawdown.min() * 100)
+
+        mdd_m = max_drawdown(data_main['Adj Close'])
+        mdd_c = max_drawdown(data_compare['Adj Close'])
+
+        # Correlation between the two
+        common_idx = data_main.index.intersection(data_compare.index)
+        corr_val   = 0.0
+        if len(common_idx) > 10:
+            r_m = data_main.loc[common_idx, 'Adj Close'].pct_change().dropna()
+            r_c = data_compare.loc[common_idx, 'Adj Close'].pct_change().dropna()
+            common2 = r_m.index.intersection(r_c.index)
+            if len(common2) > 5:
+                corr_val = float(r_m.loc[common2].corr(r_c.loc[common2]))
+
+        # Beta of main vs compare
+        beta_val = 0.0
+        if len(common_idx) > 10:
+            cov_mat = np.cov(
+                r_m.loc[common2].values,
+                r_c.loc[common2].values
+            )
+            beta_val = cov_mat[0, 1] / (cov_mat[1, 1] + 1e-9)
+
+        e1, e2, e3, e4, e5, e6 = st.columns(6)
+        e1.metric(f"{selected_ticker} Sharpe", f"{sharpe_m:.2f}")
+        e2.metric(f"{compare_ticker} Sharpe",  f"{sharpe_c:.2f}")
+        e3.metric(f"{selected_ticker} Max DD",  f"{mdd_m:.1f}%")
+        e4.metric(f"{compare_ticker} Max DD",   f"{mdd_c:.1f}%")
+        e5.metric("Correlation",               f"{corr_val:.3f}")
+        e6.metric(f"Beta ({selected_ticker}/{compare_ticker})", f"{beta_val:.3f}")
+
+        # Rolling correlation chart
+        st.markdown("### 📈 Rolling 60-day Correlation")
+        if len(common2) > 60:
+            rolling_corr = r_m.loc[common2].rolling(60).corr(r_c.loc[common2])
+            fig_rc = go.Figure()
+            fig_rc.add_trace(go.Scatter(
+                x=rolling_corr.index, y=rolling_corr.values,
+                mode='lines', name='Rolling Corr (60d)',
+                line=dict(color='#38bdf8', width=1.5)
+            ))
+            fig_rc.add_hline(y=0, line_dash='dash', line_color='#94a3b8')
+            fig_rc.add_hline(y=0.7, line_dash='dot', line_color='#22c55e',
+                             annotation_text="High correlation (0.7)")
+            fig_rc.add_hline(y=-0.3, line_dash='dot', line_color='#ef4444',
+                             annotation_text="Low correlation (-0.3)")
+            fig_rc.update_layout(
+                title=f"Rolling 60-day Correlation: {selected_ticker} vs {compare_ticker}",
+                xaxis_title="Date", yaxis_title="Correlation",
+                yaxis_range=[-1.1, 1.1], height=300,
+                template="plotly_dark"
+            )
+            st.plotly_chart(fig_rc, use_container_width=True)
+
+        # ── LLM ANALYSIS (COMPARISON) ─────────────────────────────────────────
+        st.markdown("---")
+        st.markdown("## 🤖 AI Expert Analysis — Comparison")
+        st.caption("Claude (Anthropic) compares both stocks across return, risk, correlation and portfolio fit.")
+
+        # Annualised return
+        years = max((data_main.index[-1] - data_main.index[0]).days / 365, 0.01)
+        cagr_m = ((data_main['Adj Close'].iloc[-1] / data_main['Adj Close'].iloc[0]) ** (1/years) - 1) * 100
+        cagr_c = ((data_compare['Adj Close'].iloc[-1] / data_compare['Adj Close'].iloc[0]) ** (1/years) - 1) * 100
+
+        # Recent 30-day momentum
+        mom_m = float((data_main['Adj Close'].iloc[-1] / data_main['Adj Close'].iloc[-min(22, len(data_main))] - 1) * 100)
+        mom_c = float((data_compare['Adj Close'].iloc[-1] / data_compare['Adj Close'].iloc[-min(22, len(data_compare))] - 1) * 100)
+
+        comp_prompt = f"""You are a senior equity analyst at a top-tier investment bank.
+Compare {selected_ticker} and {compare_ticker} based on the quantitative data below and 
+give a structured investment comparison report.
+
+=== RETURN ANALYSIS ===
+Period analysed: {str(start_date)} to {str(end_date)} ({years:.1f} years)
+{selected_ticker} total return:    {rm:+.2f}%
+{compare_ticker} total return:     {rc:+.2f}%
+{selected_ticker} CAGR:            {cagr_m:+.2f}%/yr
+{compare_ticker} CAGR:             {cagr_c:+.2f}%/yr
+{selected_ticker} 30-day momentum: {mom_m:+.2f}%
+{compare_ticker} 30-day momentum:  {mom_c:+.2f}%
+
+=== RISK ANALYSIS ===
+{selected_ticker} annualised volatility: {vm:.1f}%
+{compare_ticker} annualised volatility:  {vc:.1f}%
+{selected_ticker} max drawdown:          {mdd_m:.1f}%
+{compare_ticker} max drawdown:           {mdd_c:.1f}%
+{selected_ticker} Sharpe ratio:          {sharpe_m:.2f}
+{compare_ticker} Sharpe ratio:           {sharpe_c:.2f}
+
+=== RELATIONSHIP ===
+Pearson correlation (daily returns): {corr_val:.3f}
+Beta of {selected_ticker} relative to {compare_ticker}: {beta_val:.3f}
+
+Write a structured analysis with exactly these 4 sections:
+
+**1. PERFORMANCE VERDICT**
+Which stock delivered better risk-adjusted returns? Reference CAGR, Sharpe, and max drawdown 
+with specific numbers. State clearly which performed better and by how much.
+
+**2. RISK PROFILE COMPARISON**
+Compare volatility, drawdown, and Sharpe. Which is safer? Which offers better return-per-unit-risk?
+Explain what the beta of {beta_val:.3f} means for an investor holding both.
+
+**3. CORRELATION & PORTFOLIO IMPACT**
+Explain what a correlation of {corr_val:.3f} means for someone holding both in a portfolio. 
+Does adding {compare_ticker} to a {selected_ticker} position improve diversification? 
+Be specific about the diversification benefit or lack thereof.
+
+**4. INVESTMENT RECOMMENDATION**
+Given everything above, which stock would you prefer for: (a) growth-focused investors, 
+(b) risk-averse investors, (c) portfolio diversification. Give a clear, differentiated answer 
+for each investor type. Do not give generic disclaimers.
+
+Be direct and specific. Use the actual numbers throughout.
+"""
+
+        with st.spinner("Claude is comparing both stocks…"):
+            llm_comp_response = call_claude(comp_prompt, max_tokens=1000)
+
+        st.markdown(
+            f'<div class="llm-box">'
+            f'<div class="llm-header">🤖 Claude Analysis — {selected_ticker} vs {compare_ticker}</div>'
+            f'{llm_comp_response.replace(chr(10), "<br>")}'
+            f'</div>',
+            unsafe_allow_html=True
+        )
+
     else:
         st.error("Not enough data to compare.")
 
