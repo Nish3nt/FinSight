@@ -1,942 +1,799 @@
-# =============================================================================
-#  FinSight — app.py  (FIXED — f-string formatting bug resolved)
-#  Model  : Multi-feature LSTM  |  Target : Log Returns
-#  Eval   : Walk-Forward R², Directional Accuracy, MAPE, RMSE, Naïve Baseline
-# =============================================================================
+"""
+AutoML Debugger — Streamlit Application v2
+==========================================
+Three flaws fixed in this version:
 
+  FIX 1 -> No multicollinearity detection
+           -> VIF scores + feature correlation heatmap + problematic pairs table + LLM interpretation
+
+  FIX 2 -> No statistical hypothesis testing
+           -> Pearson r / t-test / ANOVA / chi-squared per feature + p-values + LLM interpretation
+
+  FIX 3 -> Feature importance only from Random Forest (biased toward high-cardinality features)
+           -> Mutual Information scores (model-free) shown alongside RF importance for cross-checking
+"""
+
+import os
+import json
 import streamlit as st
-import yfinance as yf
 import pandas as pd
 import numpy as np
-import plotly.graph_objects as go
 import plotly.express as px
-import nltk
-from nltk.sentiment.vader import SentimentIntensityAnalyzer
-import requests
-from datetime import datetime, timedelta
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import LSTM, Dense, Dropout
-from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
-from tensorflow.keras.optimizers import Adam
-from sklearn.preprocessing import MinMaxScaler
-from sklearn.metrics import mean_squared_error, r2_score
-import time
-from streamlit_option_menu import option_menu
+import plotly.graph_objects as go
+from pathlib import Path
+from scipy import stats
+from sklearn.linear_model import LinearRegression
+from sklearn.feature_selection import mutual_info_regression, mutual_info_classif
 
-# ── Initial Setup ─────────────────────────────────────────────────────────────
-nltk.download('vader_lexicon', quiet=True)
-sia          = SentimentIntensityAnalyzer()
-current_date = datetime.now().date()
-st.set_page_config(page_title="FinSight", layout="wide")
+# must be FIRST Streamlit call
+st.set_page_config(
+    page_title="AutoML Debugger",
+    page_icon="🧠",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
 
+from src.debugger_engine import run_debugger_pipeline
+
+ANTHROPIC_API_KEY = "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"
+
+
+def call_llm(prompt: str, max_tokens: int = 600) -> list:
+    try:
+        import anthropic
+        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        msg = client.messages.create(
+            model="claude-sonnet-4-5",
+            max_tokens=max_tokens,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        raw = msg.content[0].text.strip()
+        if raw.startswith("```"):
+            raw = "\n".join(raw.split("\n")[1:])
+            raw = raw.replace("```", "").strip()
+        if raw.lstrip().startswith("["):
+            try:
+                bullets = json.loads(raw)
+                if isinstance(bullets, list):
+                    return [str(b) for b in bullets]
+            except Exception:
+                pass
+        lines = [
+            ln.strip().lstrip("*-+.1234567890)").strip()
+            for ln in raw.split("\n") if ln.strip()
+        ]
+        return [ln for ln in lines if ln]
+    except Exception as e:
+        return [f"LLM unavailable: {e}"]
+
+
+def compute_vif(X_numeric: pd.DataFrame) -> pd.DataFrame:
+    cols = X_numeric.columns.tolist()
+    if len(cols) < 2:
+        return pd.DataFrame({"Feature": cols, "VIF": [1.0] * len(cols)})
+    vif_rows = []
+    for col in cols:
+        others = [c for c in cols if c != col]
+        X_other = X_numeric[others].copy()
+        y_col   = X_numeric[col].copy()
+        mask    = ~(X_other.isna().any(axis=1) | y_col.isna())
+        if mask.sum() < 10:
+            vif_rows.append({"Feature": col, "VIF": float("nan")})
+            continue
+        try:
+            reg = LinearRegression()
+            reg.fit(X_other[mask], y_col[mask])
+            r2  = min(max(float(reg.score(X_other[mask], y_col[mask])), 0.0), 0.9999)
+            vif = round(1.0 / (1.0 - r2), 2)
+        except Exception:
+            vif = float("nan")
+        vif_rows.append({"Feature": col, "VIF": vif})
+    return pd.DataFrame(vif_rows).sort_values("VIF", ascending=False).reset_index(drop=True)
+
+
+def get_high_corr_pairs(corr_matrix: pd.DataFrame, threshold: float = 0.75) -> pd.DataFrame:
+    pairs = []
+    cols  = corr_matrix.columns.tolist()
+    for i in range(len(cols)):
+        for j in range(i + 1, len(cols)):
+            c = corr_matrix.iloc[i, j]
+            if abs(c) >= threshold:
+                pairs.append({
+                    "Feature A":   cols[i],
+                    "Feature B":   cols[j],
+                    "Correlation": round(float(c), 4),
+                    "Severity":    "🔴 High" if abs(c) >= 0.9 else "🟡 Moderate",
+                })
+    if not pairs:
+        return pd.DataFrame()
+    return pd.DataFrame(pairs).sort_values("Correlation", key=abs, ascending=False).reset_index(drop=True)
+
+
+def run_statistical_tests(df: pd.DataFrame, target_col: str, task_type: str) -> pd.DataFrame:
+    results = []
+    X = df.drop(columns=[target_col])
+    y = df[target_col]
+    numeric_cols     = X.select_dtypes(include=[np.number]).columns.tolist()
+    categorical_cols = X.select_dtypes(exclude=[np.number]).columns.tolist()
+
+    for col in numeric_cols:
+        series = X[col].copy()
+        if task_type == "regression":
+            y_num  = pd.to_numeric(y, errors="coerce")
+            common = series.dropna().index.intersection(y_num.dropna().index)
+            if len(common) < 5:
+                continue
+            try:
+                r_val, p_val = stats.pearsonr(series[common].astype(float), y_num[common].astype(float))
+                results.append({
+                    "Feature": col, "Type": "Numeric", "Test": "Pearson r",
+                    "Statistic": round(float(r_val), 4), "p-value": round(float(p_val), 4),
+                    "Significant": "Yes" if p_val < 0.05 else "No",
+                    "Interpretation": _interp(p_val, col),
+                })
+            except Exception:
+                pass
+        else:
+            classes = y.dropna().unique()
+            groups  = [X.loc[y == c, col].dropna() for c in classes if len(X.loc[y == c, col].dropna()) >= 3]
+            if len(groups) < 2:
+                continue
+            try:
+                if len(groups) == 2:
+                    stat, p_val = stats.ttest_ind(groups[0], groups[1], equal_var=False)
+                    test_name   = "Welch t-test"
+                else:
+                    stat, p_val = stats.f_oneway(*groups)
+                    test_name   = "ANOVA F-test"
+                results.append({
+                    "Feature": col, "Type": "Numeric", "Test": test_name,
+                    "Statistic": round(float(stat), 4), "p-value": round(float(p_val), 4),
+                    "Significant": "Yes" if p_val < 0.05 else "No",
+                    "Interpretation": _interp(p_val, col),
+                })
+            except Exception:
+                pass
+
+    for col in categorical_cols:
+        try:
+            ct = pd.crosstab(X[col].fillna("__NA__"), y.fillna("__NA__"))
+            if ct.shape[0] < 2 or ct.shape[1] < 2:
+                continue
+            chi2, p_val, dof, _ = stats.chi2_contingency(ct)
+            results.append({
+                "Feature": col, "Type": "Categorical", "Test": f"Chi-squared (dof={dof})",
+                "Statistic": round(float(chi2), 4), "p-value": round(float(p_val), 4),
+                "Significant": "Yes" if p_val < 0.05 else "No",
+                "Interpretation": _interp(p_val, col),
+            })
+        except Exception:
+            pass
+
+    return pd.DataFrame(results) if results else pd.DataFrame()
+
+
+def _interp(p: float, feature: str) -> str:
+    if p < 0.001:
+        return f"Very strong evidence '{feature}' relates to target (p<0.001)."
+    elif p < 0.01:
+        return f"Strong evidence '{feature}' is significant (p={p:.4f})."
+    elif p < 0.05:
+        return f"Moderate evidence '{feature}' is significant (p={p:.4f})."
+    return f"No significant relationship for '{feature}' (p={p:.4f})."
+
+
+def compute_mutual_info(X, y, task_type, numeric_features, categorical_features):
+    X_enc = X[numeric_features].copy()
+    for col in categorical_features:
+        X_enc[col] = X[col].astype("category").cat.codes.astype(float)
+    X_enc = X_enc.fillna(X_enc.median(numeric_only=True))
+    if X_enc.empty:
+        return pd.DataFrame()
+    discrete_mask = [False] * len(numeric_features) + [True] * len(categorical_features)
+    try:
+        if task_type == "regression":
+            y_num = pd.to_numeric(y, errors="coerce")
+            y_num = y_num.fillna(y_num.median())
+            mi    = mutual_info_regression(X_enc, y_num, discrete_features=discrete_mask, random_state=42)
+        else:
+            from sklearn.preprocessing import LabelEncoder
+            le    = LabelEncoder()
+            y_enc = le.fit_transform(y.astype(str))
+            mi    = mutual_info_classif(X_enc, y_enc, discrete_features=discrete_mask, random_state=42)
+    except Exception:
+        return pd.DataFrame()
+    mi_df = pd.DataFrame({"Feature": X_enc.columns.tolist(), "Mutual Information": mi})
+    mi_df = mi_df.sort_values("Mutual Information", ascending=False).head(15).reset_index(drop=True)
+    max_mi = mi_df["Mutual Information"].max()
+    mi_df["MI_norm"] = (mi_df["Mutual Information"] / max_mi).round(4) if max_mi > 0 else 0.0
+    return mi_df
+
+
+# ── CSS ──────────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
-[data-testid="stSidebar"]>div:first-child{background:#0b1220;padding:16px 12px}
-.block-container{padding-top:.6rem;padding-bottom:.4rem}
-.model-box{background:#000;padding:18px;border-radius:12px;
-           border:1px solid #111827;font-size:14px;color:#e6eef8}
-.info-bar{font-size:12px;color:#cbd5e1;padding:8px 10px;background:#0b1220;
-          border-radius:6px;margin-bottom:8px}
-.metric-card{background:#0f172a;border-radius:10px;padding:14px 10px;
-             text-align:center;border:1px solid #1e293b;margin-bottom:6px}
-.metric-label{font-size:12px;color:#94a3b8;margin-bottom:4px}
-.metric-value{font-size:22px;font-weight:700;color:#e2e8f0}
-.metric-sub{font-size:11px;color:#64748b;margin-top:2px}
-.good{color:#22c55e!important}
-.warn{color:#f59e0b!important}
-.bad {color:#ef4444!important}
-.skel-card{background:linear-gradient(90deg,#111827 25%,#0b1220 50%,#111827 75%);
-           background-size:200% 100%;animation:shimmer 1.4s linear infinite;
-           height:120px;border-radius:10px;margin-bottom:12px}
-@keyframes shimmer{0%{background-position:200% 0}100%{background-position:-200% 0}}
-.baseline-box{background:#0f172a;border:1px solid #1e293b;
-              border-radius:10px;padding:14px;margin-bottom:6px}
+[data-testid="stAppViewContainer"] { background-color: #0e1117; }
+[data-testid="stSidebar"]          { background-color: #161b27; border-right:1px solid #2a2f45; }
+h1,h2,h3 { font-family:'Segoe UI',sans-serif; }
+.metric-card {
+    background: linear-gradient(135deg,#1a1f35 0%,#1e2540 100%);
+    border:1px solid #2e3555; border-radius:12px;
+    padding:18px 22px; text-align:center;
+    box-shadow:0 4px 15px rgba(0,0,0,0.3);
+}
+.metric-value { font-size:2rem; font-weight:700; color:#7eb6ff; }
+.metric-label { font-size:0.8rem; color:#8892a4; text-transform:uppercase; letter-spacing:1px; margin-top:4px; }
+.analysis-bullet {
+    background:#161b27; border-left:3px solid #7eb6ff;
+    border-radius:6px; padding:12px 16px; margin-bottom:10px;
+    font-size:0.95rem; line-height:1.5;
+}
+.health-bar-bg {
+    background:#1a1f35; border-radius:8px; height:16px;
+    overflow:hidden; border:1px solid #2e3555;
+}
+.pill { display:inline-block; padding:3px 12px; border-radius:20px; font-size:0.8rem; font-weight:600; margin:3px; }
+.pill-blue  { background:#1a3a5c; color:#7eb6ff; border:1px solid #2a5080; }
+.pill-green { background:#1a3a2c; color:#5dbc8a; border:1px solid #2a6040; }
+.pill-red   { background:#3a1a1a; color:#e07070; border:1px solid #804040; }
+.pill-amber { background:#3a2a1a; color:#e0b070; border:1px solid #806040; }
+.section-tag {
+    display:inline-block; background:#1a3a5c; color:#7eb6ff;
+    border:1px solid #2a5080; border-radius:6px;
+    padding:2px 10px; font-size:0.75rem; font-weight:700;
+    letter-spacing:1px; margin-bottom:8px;
+}
 </style>
 """, unsafe_allow_html=True)
 
-st.title("**FinSight**: Real-Time Stock Intelligence")
-
-# ── Full S&P 500 Ticker List ──────────────────────────────────────────────────
-tickers = [
-    'A','AAPL','ABBV','ABNB','ABT','ACGL','ACN','ADBE','ADI','ADM','ADP','ADSK',
-    'AEE','AEP','AES','AFL','AIG','AIZ','AJG','AKAM','ALB','ALGN','ALL','ALLE',
-    'AMAT','AMD','AME','AMGN','AMP','AMT','AMZN','ANET','ANSS','AON','AOS','APA',
-    'APD','APH','APTV','ARE','ATO','AVB','AVGO','AVY','AWK','AXON','AXP','AZO',
-    'BA','BAC','BALL','BAX','BBWI','BBY','BDX','BEN','BF.B','BG','BIIB','BIO',
-    'BK','BKNG','BKR','BLDR','BLK','BMY','BR','BRK.B','BRO','BSX','BWA','BX',
-    'BXP','C','CAG','CAH','CARR','CAT','CB','CBOE','CBRE','CCI','CCL','CDNS',
-    'CDW','CE','CEG','CFG','CHD','CHRW','CHTR','CI','CINF','CL','CLX','CMA',
-    'CMCSA','CME','CMG','CMI','CMS','CNC','CNP','COF','COO','COP','COR','COST',
-    'CPAY','CPB','CPRT','CRL','CRM','CSCO','CSGP','CSX','CTAS','CTRA','CTSH',
-    'CVS','CVX','D','DAL','DASH','DD','DE','DECK','DELL','DFS','DG','DGX','DHI',
-    'DHR','DIS','DLR','DLTR','DOC','DOV','DOW','DPZ','DRI','DTE','DUK','DVA',
-    'DVN','DXCM','EA','EBAY','ED','EFX','EG','EIX','EL','ELV','EMN','EMR',
-    'ENPH','EOG','EPAM','EQIX','EQR','ES','ESS','ETN','ETR','EVRG','EW','EXC',
-    'EXPD','EXPE','F','FANG','FAST','FDS','FDX','FE','FFIV','FI','FICO','FIS',
-    'FITB','FOX','FOXA','FRT','FSLR','FTNT','FTV','GD','GE','GEHC','GEN','GEV',
-    'GILD','GIS','GL','GLW','GM','GNRC','GOOG','GOOGL','GPC','GPN','GRMN','GS',
-    'GWW','HAL','HAS','HBAN','HCA','HD','HES','HIG','HII','HLT','HOLX','HON',
-    'HPE','HPQ','HRL','HSIC','HST','HSY','HUBB','HUM','HWM','IBM','ICE','IDXX',
-    'IEX','IFF','ILMN','INCY','INTC','INTU','INVH','IP','IPG','IQV','IR','IRM',
-    'ISRG','IT','ITW','IVZ','J','JBHT','JBL','JCI','JKHY','JNJ','JPM','K',
-    'KDP','KEY','KEYS','KHC','KIM','KLAC','KMB','KMI','KO','KR','KVUE','L',
-    'LDOS','LEN','LH','LHX','LIN','LKQ','LLY','LMT','LNT','LOW','LRCX','LULU',
-    'LUV','LVS','LW','LYB','LYV','MAA','MAR','MAS','MCD','MCHP','MCK','MCO',
-    'MDLZ','MDT','MET','META','MGM','MHK','MKC','MLM','MMC','MMM','MNST','MO',
-    'MOH','MOS','MPC','MPWR','MRK','MRNA','MS','MSCI','MSFT','MSI','MTB','MTCH',
-    'MTD','MU','NCLH','NDAQ','NDSN','NEE','NEM','NFLX','NI','NKE','NOC','NOW',
-    'NRG','NSC','NTAP','NTRS','NVDA','NVR','NWSA','NWS','NXPI','O','ODFL','OKE',
-    'OMC','ON','ORCL','ORLY','OTIS','OXY','PANW','PAYC','PAYX','PCAR','PCG',
-    'PEG','PEP','PFE','PFG','PG','PGR','PH','PHM','PKG','PLD','PLTR','PM',
-    'PNC','PNR','PNW','PODD','POOL','PPL','PRU','PSX','PTC','PWR','PYPL','QCOM',
-    'REG','REGN','RF','RJF','RL','RMD','ROK','ROL','ROP','ROST','RSG','RTX',
-    'RVTY','SBAC','SBUX','SCHW','SHW','SJM','SLB','SMCI','SNA','SNPS','SO',
-    'SOLV','SPG','SPGI','SRE','STE','STLD','STT','STX','STZ','SW','SWK','SWKS',
-    'SYF','SYK','SYY','T','TAP','TDG','TDY','TECH','TEL','TER','TSLA','TFC',
-    'TFX','TGT','TJX','TKO','TMO','TMUS','TPR','TRGP','TRMB','TROW','TRV',
-    'TSCO','TSN','TT','TTWO','TXN','TXT','TYL','UAL','UBER','UDR','UHS','ULTA',
-    'UNH','UNP','UPS','URI','USB','V','VFC','VICI','VLO','VLTO','VMC','VRSK',
-    'VRSN','VRTX','VST','VTR','VZ','WAB','WAT','WBA','WBD','WDC','WEC','WELL',
-    'WFC','WM','WMB','WMT','WRB','WST','WTW','WY','WYNN','XEL','XOM','XYL',
-    'YUM','ZBH','ZBRA','ZTS'
-]
-tickers = sorted(set(tickers))
-
 # ── Sidebar ───────────────────────────────────────────────────────────────────
-st.sidebar.header("Controls")
-selected_ticker = st.sidebar.selectbox("Main Stock",   tickers, index=tickers.index('AAPL'))
-compare_ticker  = st.sidebar.selectbox("Compare With", tickers, index=tickers.index('MSFT'))
-start_date = st.sidebar.date_input("Start Date", pd.to_datetime('2010-01-01').date())
-end_date   = st.sidebar.date_input("End Date",   current_date)
-if start_date > end_date:
-    st.error("Start date must be before end date."); st.stop()
-if end_date > current_date:
-    end_date = current_date
+with st.sidebar:
+    st.markdown("## ⚙️ Configuration")
+    st.divider()
+    st.markdown("### 📌 About")
+    st.markdown("""
+AutoML Debugger evaluates your dataset **before** you train any model.
 
-@st.cache_resource(ttl=300)
-def get_ticker_obj(t): return yf.Ticker(t)
-ticker_obj = get_ticker_obj(selected_ticker)
+**Diagnostics included:**
+- Missing values & duplicates
+- Outlier detection (IQR)
+- Class imbalance detection
+- Baseline + RF model metrics
+- 5-fold cross-validation
+- **🆕 Multicollinearity (VIF)**
+- **🆕 Statistical significance tests**
+- **🆕 Mutual Information scores**
+- LLM expert commentary (Claude)
+    """)
+    st.divider()
+    st.markdown("Built by **Nishant Diwate**")
 
-# ── Finnhub News ──────────────────────────────────────────────────────────────
-@st.cache_data(ttl=300)
-def get_news(ticker):
-    api_key = "d6qgus9r01qhcrmk4od0d6qgus9r01qhcrmk4odg"
-    try:
-        to_d   = datetime.now().strftime('%Y-%m-%d')
-        from_d = (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d')
-        url    = (f"https://finnhub.io/api/v1/company-news?symbol={ticker}"
-                  f"&from={from_d}&to={to_d}&token={api_key}")
-        r = requests.get(url, timeout=15)
-        if r.status_code == 200:
-            headlines, posts, links = [], [], []
-            for art in r.json()[:10]:
-                t_ = art.get('headline', '').strip()
-                s_ = art.get('source', 'Finnhub')
-                u_ = art.get('url', '#')
-                if t_:
-                    headlines.append(f"**{t_}** – {s_}")
-                    posts.append(f"{t_} – {s_}")
-                    links.append(u_)
-            return (headlines or ["No recent news."]), posts, links
-        return [f"Finnhub error {r.status_code}"], [], []
-    except Exception as e:
-        return [f"Error: {e}"], [], []
+# ── Header ────────────────────────────────────────────────────────────────────
+c1, c2 = st.columns([1, 8])
+with c1:
+    st.markdown("<h1 style='font-size:3rem;margin:0'>🧠</h1>", unsafe_allow_html=True)
+with c2:
+    st.markdown("<h1 style='margin:0;padding-top:10px'>AutoML Debugger</h1>", unsafe_allow_html=True)
+    st.markdown("<p style='color:#8892a4;margin:0'>LLM-Assisted Dataset Diagnostics for ML Engineers</p>", unsafe_allow_html=True)
+st.divider()
 
-news_headlines, news_posts, news_links = get_news(selected_ticker)
+# ── Upload ────────────────────────────────────────────────────────────────────
+FALLBACK_DATASET = Path("data/initial_dataset.csv")
+cu, ci = st.columns([2, 1])
+with cu:
+    st.subheader("📂 Upload Dataset")
+    uploaded_file = st.file_uploader("Upload CSV or use built-in sample", type=["csv"], label_visibility="collapsed")
+with ci:
+    st.markdown("**Formats:** CSV  \n**Min:** 10 rows, 2 cols  \n**Tip:** Last col = target by default")
 
-@st.cache_data(ttl=300)
-def compute_vader(posts):
-    return [sia.polarity_scores(p)['compound'] for p in posts]
-vader_scores = compute_vader(news_posts)
+df, source = None, None
+if uploaded_file is not None:
+    df, source = pd.read_csv(uploaded_file), "uploaded"
+elif FALLBACK_DATASET.exists():
+    df, source = pd.read_csv(FALLBACK_DATASET), "fallback"
 
-# ── Fetch Stock Data ──────────────────────────────────────────────────────────
-@st.cache_data(ttl=600)
-def fetch_stock_data(ticker, start, end):
-    try:
-        df = yf.download(ticker, start=start, end=end, progress=False)
-        if df.empty: return None
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.droplevel(1)
-        if 'Adj Close' not in df.columns and 'Close' in df.columns:
-            df['Adj Close'] = df['Close']
-        req = ['Open', 'High', 'Low', 'Close', 'Adj Close', 'Volume']
-        for c in req:
-            if c not in df.columns: df[c] = np.nan
-        df = df[req].dropna(subset=['Adj Close'])
-        return df if len(df) >= 120 else None
-    except:
-        return None
+if source == "uploaded":
+    st.success(f"✅ Uploaded — {df.shape[0]:,} rows × {df.shape[1]} cols")
+elif source == "fallback":
+    st.info(f"ℹ️ Using built-in sample — {df.shape[0]:,} rows × {df.shape[1]} cols")
 
-data_main    = fetch_stock_data(selected_ticker, start_date, end_date)
-data_compare = fetch_stock_data(compare_ticker,  start_date, end_date)
+# ── Preview & Target ──────────────────────────────────────────────────────────
+target_column = None
+if df is not None:
+    with st.expander("🔍 Preview Dataset", expanded=False):
+        st.dataframe(df.head(10), use_container_width=True)
+    target_column = st.selectbox(
+        "🎯 Select Target Column",
+        options=df.columns.tolist(),
+        index=len(df.columns) - 1,
+    )
+st.divider()
 
-# ── Feature Engineering (11 features) ────────────────────────────────────────
-def compute_features(raw):
-    """
-    Returns (feature_df, price_series).
-    Column 0 of feature_df = LogReturn  (model target — stationary & unbiased).
-    """
-    df = raw.copy()
-    df['LogReturn']   = np.log(df['Adj Close'] / df['Adj Close'].shift(1))
-    df['SMA20']       = df['Adj Close'].rolling(20).mean()
-    df['SMA50']       = df['Adj Close'].rolling(50).mean()
-    df['EMA12']       = df['Adj Close'].ewm(span=12, adjust=False).mean()
-    df['EMA26']       = df['Adj Close'].ewm(span=26, adjust=False).mean()
-    df['MACD']        = df['EMA12'] - df['EMA26']
-    df['MACD_Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
-    delta             = df['Adj Close'].diff()
-    up                = delta.clip(lower=0)
-    dn                = -delta.clip(upper=0)
-    df['RSI']         = 100 - 100 / (1 + up.rolling(14).mean() / (dn.rolling(14).mean() + 1e-9))
-    rm                = df['Adj Close'].rolling(20).mean()
-    rs                = df['Adj Close'].rolling(20).std()
-    df['BB_Width']    = (2 * rs) / (rm + 1e-9)
-    hl                = df['High'] - df['Low']
-    hc                = (df['High'] - df['Adj Close'].shift()).abs()
-    lc                = (df['Low']  - df['Adj Close'].shift()).abs()
-    df['ATR']         = pd.concat([hl, hc, lc], axis=1).max(axis=1).rolling(14).mean()
-    df['LogVolume']   = np.log1p(df['Volume'])
+# ── Run ───────────────────────────────────────────────────────────────────────
+run_clicked = st.button("🚀 Run AutoML Diagnostics", type="primary", use_container_width=True)
 
-    feature_cols = [
-        'LogReturn', 'LogVolume',
-        'SMA20', 'SMA50', 'EMA12', 'EMA26',
-        'MACD', 'MACD_Signal',
-        'RSI', 'BB_Width', 'ATR'
-    ]
-    return df[feature_cols].dropna(), df['Adj Close']
-
-# ── Tabs ──────────────────────────────────────────────────────────────────────
-tab = option_menu(None,
-    ["Data & Viz", "Predictions", "Sentiment", "Comparison", "Portfolio Analyzer"],
-    icons=["table", "graph-up", "chat-dots", "arrow-left-right", "pie-chart"],
-    orientation="horizontal")
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  TAB 1 — DATA & VIZ
-# ══════════════════════════════════════════════════════════════════════════════
-if tab == "Data & Viz":
-    st.subheader(f"**{selected_ticker}** – Price History")
-    if data_main is not None:
-        st.dataframe(data_main.tail(100), use_container_width=True)
-        st.download_button("⬇ Download CSV", data_main.to_csv().encode(), f"{selected_ticker}.csv")
-        fig = px.line(data_main, x=data_main.index, y='Adj Close',
-                      title=f"{selected_ticker} — Adjusted Close Price")
-        st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.error("No data available. Try expanding date range.")
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  TAB 2 — PREDICTIONS
-# ══════════════════════════════════════════════════════════════════════════════
-elif tab == "Predictions":
-    st.subheader("Price Forecast — Multi-feature LSTM  |  Industry-Grade Evaluation")
-
-    if data_main is None:
-        st.error("Not enough data. Expand date range or choose another ticker.")
+if run_clicked:
+    if df is None:
+        st.warning("No dataset available. Please upload a CSV file.")
         st.stop()
 
-    # Controls
-    c1, c2 = st.columns([2, 1])
-    with c1:
-        days       = st.slider("Forecast horizon (trading days)", 1, 30, 7)
-        time_step  = st.slider("Lookback window (days)", 60, 180, 90, step=10)
-        epochs     = st.slider("Training epochs", 20, 150, 80, step=5)
-        batch_size = st.selectbox("Batch size", [16, 32, 64], index=1)
-        retrain    = st.checkbox("⚠️ Force retrain model", value=False)
-    with c2:
-        st.markdown("""
-        <div class="model-box">
-        <b>11-Feature LSTM</b><br><br>
-        <b>Trend:</b> SMA20, SMA50, EMA12, EMA26<br>
-        <b>Momentum:</b> MACD, Signal, RSI<br>
-        <b>Volatility:</b> BB Width, ATR<br>
-        <b>Other:</b> Log Return, Log Volume<br><br>
-        <b>Evaluation (industry-grade):</b><br>
-        • Walk-Forward R² (5 rolling folds)<br>
-        • Directional Accuracy %<br>
-        • MAPE % &amp; RMSE $<br>
-        • vs Naïve Baseline<br><br>
-        🎯 Target R² &gt; 0.82 | DA &gt; 55%
-        </div>""", unsafe_allow_html=True)
+    with st.spinner("🔬 Running full ML diagnostics…"):
+        output = run_debugger_pipeline(df, target_column, api_key=ANTHROPIC_API_KEY)
 
-    df_features, price_series = compute_features(data_main)
-    if len(df_features) < time_step + 30:
-        st.error(f"Not enough rows. Need ≥ {time_step+30}, got {len(df_features)}.")
+    metrics      = output.get("metrics", {})
+    profile      = output.get("profile", {})
+    feature_imp  = output.get("feature_importance", {})
+    llm_analysis = output.get("llm_analysis", [])
+    task_type    = output.get("task_type", "unknown")
+    health_score = output.get("health_score", 0)
+    diagnosis    = output.get("diagnosis", "")
+
+    if not metrics:
+        st.error(f"❌ {diagnosis}")
+        for line in llm_analysis:
+            st.warning(line)
         st.stop()
 
-    # ── Training Function ─────────────────────────────────────────────────────
-    @st.cache_resource(ttl=24 * 3600)
-    def train_model(ticker, start_str, end_str, time_step, epochs, batch_size, retrain_flag):
-        t0            = time.time()
-        training_time = datetime.now()
+    # Working clean copies
+    df_clean     = df.dropna(subset=[target_column]).copy()
+    X_all        = df_clean.drop(columns=[target_column])
+    y_all        = df_clean[target_column]
+    numeric_feats = X_all.select_dtypes(include=[np.number]).columns.tolist()
+    cat_feats     = X_all.select_dtypes(exclude=[np.number]).columns.tolist()
 
-        raw = yf.download(ticker, start=start_str, end=end_str, progress=False)
-        if isinstance(raw.columns, pd.MultiIndex):
-            raw.columns = raw.columns.droplevel(1)
-        if 'Adj Close' not in raw.columns and 'Close' in raw.columns:
-            raw['Adj Close'] = raw['Close']
-
-        df_feat, price_s = compute_features(raw)
-
-        scaler = MinMaxScaler(feature_range=(-1, 1))
-        scaled = scaler.fit_transform(df_feat.values)
-        prices_arr = price_s.loc[df_feat.index].values
-
-        # Sequences
-        X, y = [], []
-        for i in range(len(scaled) - time_step):
-            X.append(scaled[i:i + time_step, :])
-            y.append(scaled[i + time_step, 0])   # LogReturn col=0
-        X = np.array(X)
-        y = np.array(y)
-
-        n       = X.shape[0]
-        train_n = int(n * 0.80)
-        X_tr, y_tr = X[:train_n], y[:train_n]
-        X_te, y_te = X[train_n:], y[train_n:]
-        n_feat  = X.shape[2]
-
-        # Model
-        model = Sequential([
-            LSTM(128, return_sequences=True, input_shape=(time_step, n_feat)),
-            Dropout(0.2),
-            LSTM(64),
-            Dropout(0.15),
-            Dense(32, activation='relu'),
-            Dense(1)
-        ])
-        model.compile(optimizer=Adam(0.001), loss='mse')
-
-        cbs, val_split = [], 0.0
-        if len(X_tr) > 20:
-            cbs = [
-                EarlyStopping(monitor='val_loss', patience=12,
-                              restore_best_weights=True, verbose=0),
-                ReduceLROnPlateau(monitor='val_loss', factor=0.5,
-                                  patience=6, min_lr=1e-6, verbose=0)
-            ]
-            val_split = 0.1
-
-        history = model.fit(X_tr, y_tr,
-                            epochs=epochs, batch_size=batch_size,
-                            validation_split=val_split,
-                            callbacks=cbs, verbose=0)
-
-        # Backtest — reconstruct price from predicted log-return
-        bt_preds_p, bt_actuals_p   = [], []
-        bt_pred_ret, bt_actual_ret = [], []
-        dummy_row = np.zeros((1, n_feat))
-
-        for i in range(len(X_te)):
-            global_idx = time_step + train_n + i
-
-            pred_sc        = float(model.predict(X_te[i:i+1], verbose=0)[0, 0])
-            dummy_row[0, 0] = pred_sc
-            pred_lr        = float(scaler.inverse_transform(dummy_row)[0, 0])
-            actual_lr      = float(df_feat['LogReturn'].iloc[global_idx])
-
-            prev_price  = float(price_s.iloc[global_idx - 1])
-            pred_price  = prev_price * np.exp(pred_lr)
-            actual_price= float(price_s.iloc[global_idx])
-
-            bt_preds_p.append(pred_price)
-            bt_actuals_p.append(actual_price)
-            bt_pred_ret.append(pred_lr)
-            bt_actual_ret.append(actual_lr)
-
-        bt_preds_p   = np.array(bt_preds_p)
-        bt_actuals_p = np.array(bt_actuals_p)
-        bt_pred_ret  = np.array(bt_pred_ret)
-        bt_actual_ret= np.array(bt_actual_ret)
-
-        # Walk-Forward R² (5 folds)
-        wf_r2_list = []
-        fold_size  = max(10, len(bt_preds_p) // 5)
-        for fold in range(5):
-            s = fold * fold_size
-            e = min(s + fold_size, len(bt_preds_p))
-            if e - s < 5: break
-            wf_r2_list.append(float(r2_score(bt_actuals_p[s:e], bt_preds_p[s:e])))
-        wf_r2 = float(np.mean(wf_r2_list)) if wf_r2_list else 0.0
-
-        # Standard metrics
-        mse_val  = float(mean_squared_error(bt_actuals_p, bt_preds_p))
-        r2_val   = float(r2_score(bt_actuals_p, bt_preds_p))
-        rmse_val = float(np.sqrt(mse_val))
-        mape_val = float(np.mean(np.abs(
-            (bt_actuals_p - bt_preds_p) / (np.abs(bt_actuals_p) + 1e-9)
-        )) * 100)
-
-        # Directional accuracy
-        dir_acc = float(np.mean(np.sign(bt_pred_ret) == np.sign(bt_actual_ret)) * 100)
-
-        # Naïve baseline
-        naive_p  = bt_actuals_p[:-1]
-        naive_a  = bt_actuals_p[1:]
-        naive_r2   = float(r2_score(naive_a, naive_p))
-        naive_mape = float(np.mean(np.abs((naive_a - naive_p)/(np.abs(naive_a)+1e-9)))*100)
-        naive_rmse = float(np.sqrt(mean_squared_error(naive_a, naive_p)))
-
-        resid_std = float(np.std(bt_actuals_p - bt_preds_p))
-
-        return {
-            'model':            model,
-            'scaler':           scaler,
-            'df_feat':          df_feat,
-            'price_series':     price_s,
-            'time_step':        time_step,
-            'train_n':          train_n,
-            'n_feat':           n_feat,
-            'bt_preds_price':   bt_preds_p,
-            'bt_actuals_price': bt_actuals_p,
-            'bt_pred_ret':      bt_pred_ret,
-            'bt_actual_ret':    bt_actual_ret,
-            'history':          history.history,
-            'training_time':    training_time,
-            'training_secs':    time.time() - t0,
-            'epochs':           epochs,
-            'batch_size':       batch_size,
-            'mse':              mse_val,
-            'r2':               r2_val,
-            'rmse':             rmse_val,
-            'mape':             mape_val,
-            'dir_acc':          dir_acc,
-            'wf_r2':            wf_r2,
-            'wf_r2_list':       wf_r2_list,
-            'naive_r2':         naive_r2,
-            'naive_mape':       naive_mape,
-            'naive_rmse':       naive_rmse,
-            'resid_std':        resid_std,
-        }
-
-    # Skeleton loader
-    ph = st.empty()
-    with ph.container():
-        st.markdown('<div class="skel-card"></div>', unsafe_allow_html=True)
-        st.markdown('<div class="skel-card"></div>', unsafe_allow_html=True)
-    try:
-        art = train_model(
-            selected_ticker, str(start_date), str(end_date),
-            time_step, epochs, batch_size, retrain
+    # ── KPI row ───────────────────────────────────────────────────────────────
+    st.markdown("---")
+    def kpi(col, value, label):
+        col.markdown(
+            f'<div class="metric-card"><div class="metric-value">{value}</div>'
+            f'<div class="metric-label">{label}</div></div>',
+            unsafe_allow_html=True,
         )
-    finally:
-        ph.empty()
-
-    # Unpack
-    model         = art['model']
-    scaler        = art['scaler']
-    df_used       = art['df_feat']
-    price_s       = art['price_series']
-    train_n       = art['train_n']
-    bt_preds      = art['bt_preds_price']
-    bt_actuals    = art['bt_actuals_price']
-    bt_pred_ret   = art['bt_pred_ret']
-    bt_actual_ret = art['bt_actual_ret']
-    history       = art['history']
-    training_time = art['training_time']
-    n_feat        = art['n_feat']
-    resid_std     = art['resid_std']
-
-    # ── Info Bar ─────────────────────────────────────────────────────────────
-    age     = datetime.now() - training_time
-    age_str = f"{age.days}d {age.seconds//3600}h {(age.seconds%3600)//60}m"
-    st.markdown(f"""
-    <div class="info-bar">
-    <b>Model</b>: 2-layer LSTM &nbsp;|&nbsp;
-    <b>Features</b>: {n_feat} &nbsp;|&nbsp;
-    <b>Lookback</b>: {art['time_step']}d &nbsp;|&nbsp;
-    <b>Epochs</b>: {art['epochs']} &nbsp;|&nbsp;
-    <b>Batch</b>: {art['batch_size']} &nbsp;|&nbsp;
-    <b>Trained</b>: {training_time.strftime('%Y-%m-%d %H:%M')} &nbsp;|&nbsp;
-    <b>Age</b>: {age_str} &nbsp;|&nbsp;
-    <b>Cached</b>: {'Yes' if not retrain else 'No (forced)'}
-    </div>""", unsafe_allow_html=True)
-
-    # ══════════════════════════════════════════════════════════════════════════
-    #  SECTION A — EVALUATION DASHBOARD
-    # ══════════════════════════════════════════════════════════════════════════
-    st.markdown("## 📊 Model Evaluation Dashboard")
-    st.caption("Industry-standard metrics used by quant teams and ML practitioners.")
-
-    # Helper: colour class
-    def ccls(val, good_t, warn_t, higher=True):
-        if higher:
-            return "good" if val >= good_t else "warn" if val >= warn_t else "bad"
-        return "good" if val <= good_t else "warn" if val <= warn_t else "bad"
-
-    # ── Pre-format metric strings (avoids f-string conditional formatting bug) ─
-    wf_r2_str  = f"{art['wf_r2']:.3f}"
-    r2_str     = f"{art['r2']:.3f}"
-    da_str     = f"{art['dir_acc']:.1f}%"
-    mape_str   = f"{art['mape']:.2f}%"
-    rmse_str   = f"${art['rmse']:.2f}"
-
-    wf_cls  = ccls(art['wf_r2'],   0.80, 0.65)
-    r2_cls  = ccls(art['r2'],      0.80, 0.65)
-    da_cls  = ccls(art['dir_acc'], 58,   52)
-    mp_cls  = ccls(art['mape'],    3,    5,  higher=False)
-
-    m1, m2, m3, m4, m5 = st.columns(5)
-    with m1:
-        st.markdown(f"""
-        <div class="metric-card">
-          <div class="metric-label">Walk-Forward R²</div>
-          <div class="metric-value {wf_cls}">{wf_r2_str}</div>
-          <div class="metric-sub">5-fold rolling windows</div>
-        </div>""", unsafe_allow_html=True)
-    with m2:
-        st.markdown(f"""
-        <div class="metric-card">
-          <div class="metric-label">Standard R²</div>
-          <div class="metric-value {r2_cls}">{r2_str}</div>
-          <div class="metric-sub">Test set variance explained</div>
-        </div>""", unsafe_allow_html=True)
-    with m3:
-        st.markdown(f"""
-        <div class="metric-card">
-          <div class="metric-label">Directional Accuracy</div>
-          <div class="metric-value {da_cls}">{da_str}</div>
-          <div class="metric-sub">Random baseline = 50%</div>
-        </div>""", unsafe_allow_html=True)
-    with m4:
-        st.markdown(f"""
-        <div class="metric-card">
-          <div class="metric-label">MAPE</div>
-          <div class="metric-value {mp_cls}">{mape_str}</div>
-          <div class="metric-sub">Mean Abs % Error (lower=better)</div>
-        </div>""", unsafe_allow_html=True)
-    with m5:
-        st.markdown(f"""
-        <div class="metric-card">
-          <div class="metric-label">RMSE</div>
-          <div class="metric-value">{rmse_str}</div>
-          <div class="metric-sub">Avg $ error per day</div>
-        </div>""", unsafe_allow_html=True)
-
+    k1,k2,k3,k4,k5 = st.columns(5)
+    kpi(k1, f"{metrics.get('rows',0):,}", "Rows")
+    kpi(k2, str(metrics.get('columns',0)), "Columns")
+    kpi(k3, f"{metrics.get('missing_values',0):,}", "Missing")
+    kpi(k4, str(profile.get('duplicate_rows',0)), "Duplicates")
+    kpi(k5, task_type.capitalize(), "Task Type")
     st.markdown("<br>", unsafe_allow_html=True)
 
-    # ── Naïve Baseline Comparison ─────────────────────────────────────────────
-    st.markdown("### 🆚 Model vs Naïve Baseline")
-    st.caption("Naïve baseline = predicting tomorrow's price = today's price (zero ML).")
-
-    beat_r2   = art['r2']   > art['naive_r2']
-    beat_mape = art['mape'] < art['naive_mape']
-    beat_rmse = art['rmse'] < art['naive_rmse']
-    wins      = sum([beat_r2, beat_mape, beat_rmse])
-
-    # Pre-format baseline strings
-    lstm_r2_str    = f"{art['r2']:.3f}"
-    naive_r2_str   = f"{art['naive_r2']:.3f}"
-    lstm_mape_str  = f"{art['mape']:.2f}%"
-    naive_mape_str = f"{art['naive_mape']:.2f}%"
-    lstm_rmse_str  = f"${art['rmse']:.2f}"
-    naive_rmse_str = f"${art['naive_rmse']:.2f}"
-
-    r2_c   = "good" if beat_r2   else "bad"
-    mp_c   = "good" if beat_mape else "bad"
-    rm_c   = "good" if beat_rmse else "bad"
-
-    verdict_color = "good" if wins == 3 else "warn" if wins >= 2 else "bad"
-    verdict_text  = ("✅ Beats baseline on all 3 metrics" if wins == 3
-                     else f"⚠️ Beats baseline on {wins}/3 metrics" if wins >= 2
-                     else "❌ Does not beat baseline")
-
-    b1, b2, b3, b4 = st.columns(4)
-    with b1:
-        st.markdown("""
-        <div class="baseline-box">
-          <div class="metric-label">Metric</div>
-          <div style="color:#94a3b8;margin-top:10px">R²</div>
-          <div style="color:#94a3b8;margin-top:10px">MAPE</div>
-          <div style="color:#94a3b8;margin-top:10px">RMSE</div>
-        </div>""", unsafe_allow_html=True)
-    with b2:
-        st.markdown(f"""
-        <div class="baseline-box">
-          <div class="metric-label">Our LSTM</div>
-          <div class="{r2_c}" style="margin-top:10px">{lstm_r2_str}</div>
-          <div class="{mp_c}" style="margin-top:10px">{lstm_mape_str}</div>
-          <div class="{rm_c}" style="margin-top:10px">{lstm_rmse_str}</div>
-        </div>""", unsafe_allow_html=True)
-    with b3:
-        st.markdown(f"""
-        <div class="baseline-box">
-          <div class="metric-label">Naïve Baseline</div>
-          <div style="color:#e2e8f0;margin-top:10px">{naive_r2_str}</div>
-          <div style="color:#e2e8f0;margin-top:10px">{naive_mape_str}</div>
-          <div style="color:#e2e8f0;margin-top:10px">{naive_rmse_str}</div>
-        </div>""", unsafe_allow_html=True)
-    with b4:
-        st.markdown(f"""
-        <div class="baseline-box">
-          <div class="metric-label">Verdict</div>
-          <div class="{verdict_color}"
-               style="margin-top:10px;font-size:13px;font-weight:600">
-            {verdict_text}
-          </div>
-        </div>""", unsafe_allow_html=True)
-
-    st.markdown("<br>", unsafe_allow_html=True)
-
-    # ── Walk-Forward R² per fold ──────────────────────────────────────────────
-    if art['wf_r2_list']:
-        st.markdown("### 📈 Walk-Forward R² — Per Fold")
-        wf_colors = ['#22c55e' if v >= 0.80 else '#f59e0b' if v >= 0.65 else '#ef4444'
-                     for v in art['wf_r2_list']]
-        wf_labels = [f"{v:.3f}" for v in art['wf_r2_list']]
-        fold_names = [f"Fold {i+1}" for i in range(len(art['wf_r2_list']))]
-        fig_wf = go.Figure()
-        for i, (fn, fv, fc, fl) in enumerate(
-                zip(fold_names, art['wf_r2_list'], wf_colors, wf_labels)):
-            fig_wf.add_trace(go.Bar(x=[fn], y=[fv], marker_color=fc,
-                                    text=[fl], textposition='outside',
-                                    showlegend=False))
-        fig_wf.add_hline(y=0.80, line_dash='dash', line_color='#22c55e',
-                         annotation_text="Target 0.80")
-        fig_wf.add_hline(y=0.65, line_dash='dot',  line_color='#f59e0b',
-                         annotation_text="Acceptable 0.65")
-        y_min = min(min(art['wf_r2_list']) - 0.05, -0.05)
-        fig_wf.update_layout(
-            title=f"Walk-Forward R² across folds  |  Mean = {wf_r2_str}",
-            yaxis_title="R²", yaxis_range=[y_min, 1.05], height=320
-        )
-        st.plotly_chart(fig_wf, use_container_width=True)
-
-    # ══════════════════════════════════════════════════════════════════════════
-    #  SECTION B — PERFORMANCE CHARTS
-    # ══════════════════════════════════════════════════════════════════════════
-    st.markdown("## 📉 Model Performance Charts")
-    pc1, pc2 = st.columns(2)
-
-    with pc1:
-        st.write("### Training Loss Curve")
-        ep_r  = list(range(1, len(history.get('loss', [])) + 1))
-        fig_l = go.Figure()
-        fig_l.add_trace(go.Scatter(x=ep_r, y=history.get('loss', []),
-                                   mode='lines+markers', name='Train Loss',
-                                   line=dict(color='#1f77b4')))
-        if 'val_loss' in history:
-            fig_l.add_trace(go.Scatter(x=ep_r, y=history['val_loss'],
-                                       mode='lines+markers', name='Val Loss',
-                                       line=dict(color='#ff7f0e')))
-        fig_l.update_layout(title="Loss Curve (lower = better)",
-                            xaxis_title="Epoch", yaxis_title="MSE Loss")
-        st.plotly_chart(fig_l, use_container_width=True)
-
-    with pc2:
-        st.write("### Backtest: Actual vs Predicted Price")
-        if len(bt_preds) > 0:
-            bt_start = art['time_step'] + train_n
-            bt_idx   = df_used.index[bt_start: bt_start + len(bt_preds)]
-            fig_bt   = go.Figure()
-            fig_bt.add_trace(go.Scatter(x=bt_idx, y=bt_actuals,
-                                        name='Actual',    line=dict(color='#1f77b4')))
-            fig_bt.add_trace(go.Scatter(x=bt_idx, y=bt_preds,
-                                        name='Predicted', line=dict(color='#ff7f0e')))
-            fig_bt.update_layout(title="Backtest: Actual vs Predicted",
-                                 xaxis_title="Date", yaxis_title="Price ($)")
-            st.plotly_chart(fig_bt, use_container_width=True)
-            st.caption(
-                f"Samples: {len(bt_preds)}  |  "
-                f"MSE: {art['mse']:.2f}  |  "
-                f"R²: {r2_str}  |  "
-                f"RMSE: {rmse_str}  |  "
-                f"MAPE: {mape_str}"
-            )
-
-    # ── Directional Accuracy Chart ────────────────────────────────────────────
-    st.write("### 🧭 Directional Accuracy — Did Model Call Up/Down Correctly?")
-    st.caption("Green = correct direction predicted. Red = wrong. Target: consistently > 50%.")
-    if len(bt_preds) > 0:
-        dir_correct = (np.sign(bt_pred_ret) == np.sign(bt_actual_ret)).astype(int)
-        bt_idx2     = df_used.index[art['time_step'] + train_n:
-                                    art['time_step'] + train_n + len(bt_preds)]
-        bar_colors  = ['#22c55e' if c == 1 else '#ef4444' for c in dir_correct]
-        fig_dir     = go.Figure()
-        fig_dir.add_trace(go.Bar(x=bt_idx2, y=dir_correct,
-                                 marker_color=bar_colors, showlegend=False))
-        fig_dir.add_hline(y=0.5, line_dash='dash', line_color='#94a3b8',
-                          annotation_text="Random baseline (50%)")
-        n_correct = int(dir_correct.sum())
-        n_total   = len(dir_correct)
-        fig_dir.update_layout(
-            title=f"Directional Accuracy: {art['dir_acc']:.1f}%  ({n_correct}/{n_total} correct)",
-            xaxis_title="Date",
-            yaxis_title="Correct (1) / Wrong (0)",
-            height=280
-        )
-        st.plotly_chart(fig_dir, use_container_width=True)
-
-    # ── Residuals Distribution ────────────────────────────────────────────────
-    st.write("### 📐 Residuals Distribution")
-    st.caption("Tight bell curve centred near 0 = well-calibrated model.")
-    residuals = bt_actuals - bt_preds
-    res_mean  = f"{residuals.mean():.2f}"
-    res_std   = f"{residuals.std():.2f}"
-    fig_res   = go.Figure()
-    fig_res.add_trace(go.Histogram(x=residuals, nbinsx=40,
-                                   marker_color='#6366f1', opacity=0.75))
-    fig_res.add_vline(x=0, line_color='white', line_dash='dash')
-    fig_res.update_layout(
-        title=f"Residuals  |  Mean = ${res_mean}  |  Std = ${res_std}",
-        xaxis_title="Residual ($)", yaxis_title="Count", height=280
-    )
-    st.plotly_chart(fig_res, use_container_width=True)
-
-    # ══════════════════════════════════════════════════════════════════════════
-    #  SECTION C — FUTURE FORECAST
-    # ══════════════════════════════════════════════════════════════════════════
-    st.markdown("## 🔮 Future Forecast")
-
-    recent_scaled = scaler.transform(df_used.values[-time_step:]).tolist()
-    last_price    = float(price_s.iloc[-1])
-    chain_price   = last_price
-    price_list    = price_s.tolist()
-    future_preds_price = []
-    dummy_f = np.zeros((1, n_feat))
-
-    for step in range(days):
-        inp     = np.array(recent_scaled[-time_step:]).reshape(1, time_step, -1)
-        pred_sc = float(model.predict(inp, verbose=0)[0, 0])
-
-        dummy_f[0, 0] = pred_sc
-        pred_lr       = float(scaler.inverse_transform(dummy_f)[0, 0])
-        pred_price    = chain_price * np.exp(pred_lr)
-        future_preds_price.append(pred_price)
-        chain_price = pred_price
-        price_list.append(pred_price)
-
-        # Rebuild next feature row from extended price list
-        adj_s    = pd.Series(price_list)
-        log_vol_ = float(df_used['LogVolume'].iloc[-1])
-        sma20_   = adj_s.rolling(20).mean().iloc[-1]
-        sma50_   = adj_s.rolling(50).mean().iloc[-1]
-        ema12_   = adj_s.ewm(span=12, adjust=False).mean().iloc[-1]
-        ema26_   = adj_s.ewm(span=26, adjust=False).mean().iloc[-1]
-        macd_    = ema12_ - ema26_
-        macd_s_  = pd.Series(
-            [df_used['MACD_Signal'].iloc[-1]] * 8 + [macd_]
-        ).ewm(span=9, adjust=False).mean().iloc[-1]
-        diff_    = adj_s.diff().fillna(0)
-        up_      = diff_.clip(lower=0)
-        dn_      = -diff_.clip(upper=0)
-        ru_      = up_.rolling(14).mean().iloc[-1] if len(up_) >= 14 else up_.mean()
-        rd_      = dn_.rolling(14).mean().iloc[-1] if len(dn_) >= 14 else dn_.mean()
-        rsi_     = 100 - 100 / (1 + ru_ / (rd_ + 1e-9))
-        rm_      = adj_s.rolling(20).mean().iloc[-1]
-        rs_      = adj_s.rolling(20).std().iloc[-1]  if len(adj_s) >= 20 else adj_s.std()
-        bb_w_    = (2 * rs_) / (rm_ + 1e-9)
-        atr_     = float(df_used['ATR'].iloc[-1])
-
-        new_row = np.array([[pred_lr, log_vol_, sma20_, sma50_,
-                             ema12_, ema26_, macd_, macd_s_,
-                             rsi_,   bb_w_,  atr_]])
-        new_sc  = scaler.transform(new_row)[0].tolist()
-        recent_scaled.append(new_sc)
-
-    # Safe growing CI (capped at 15% of predicted price)
-    floor  = last_price * 0.55
-    z      = 1.96
-    uppers, lowers = [], []
-    for i, p in enumerate(future_preds_price):
-        hw = min(z * resid_std * np.sqrt(i + 1), 0.15 * p)
-        uppers.append(p + hw)
-        lowers.append(max(p - hw, floor))
-
-    future_dates = pd.date_range(
-        start=data_main.index[-1] + pd.Timedelta(days=1),
-        periods=days, freq='B'
-    )
-    future_df = pd.DataFrame({
-        'Date':      future_dates,
-        'Predicted': future_preds_price,
-        'Upper':     uppers,
-        'Lower':     lowers
-    })
-
-    # Animated forecast chart
-    hist_x = price_s.index
-    hist_y = price_s.values
-
-    fig_f = go.Figure()
-    fig_f.add_trace(go.Scatter(x=hist_x, y=hist_y,
-                               name='Historical', line=dict(color='#1f77b4')))
-    fig_f.add_trace(go.Scatter(x=[future_dates[0]], y=[future_preds_price[0]],
-                               name='Forecast',   line=dict(color='#ff7f0e')))
-    fig_f.add_trace(go.Scatter(
-        x=[future_dates[0], future_dates[0]],
-        y=[lowers[0], uppers[0]],
-        fill='toself', fillcolor='rgba(255,127,14,0.15)',
-        line=dict(color='rgba(255,127,14,0)'),
-        name='95% CI', showlegend=True
-    ))
-
-    frames = []
-    for i in range(len(future_dates)):
-        xp = future_dates[:i+1]
-        yp = future_preds_price[:i+1]
-        xb = list(future_dates[:i+1]) + list(future_dates[:i+1][::-1])
-        yb = list(uppers[:i+1]) + list(lowers[:i+1][::-1])
-        frames.append(go.Frame(data=[
-            go.Scatter(x=hist_x, y=hist_y),
-            go.Scatter(x=xp, y=yp, line=dict(color='#ff7f0e')),
-            go.Scatter(x=xb, y=yb, fill='toself',
-                       fillcolor='rgba(255,127,14,0.15)',
-                       line=dict(color='rgba(255,127,14,0)'))
-        ], name=str(i)))
-    fig_f.frames = frames
-
-    last_close_str = f"${last_price:.2f}"
-    fig_f.update_layout(
-        title=f"{selected_ticker} — {days}-day Forecast  |  Last close: {last_close_str}",
-        xaxis_title="Date", yaxis_title="Price ($)",
-        updatemenus=[{
-            "type": "buttons",
-            "buttons": [
-                {"label": "▶ Play", "method": "animate",
-                 "args": [None, {"frame": {"duration": 400, "redraw": True},
-                                 "fromcurrent": True,
-                                 "transition": {"duration": 200}}]},
-                {"label": "⏸ Pause", "method": "animate",
-                 "args": [[None], {"frame": {"duration": 0, "redraw": False},
-                                   "mode": "immediate",
-                                   "transition": {"duration": 0}}]}
-            ],
-            "direction": "left", "pad": {"r": 10, "t": 10},
-            "showactive": True, "x": 0.01, "y": -0.12,
-            "xanchor": "left", "yanchor": "top"
-        }]
-    )
-    st.plotly_chart(fig_f, use_container_width=True)
-    st.dataframe(
-        future_df.style.format({
-            "Predicted": "{:.2f}",
-            "Upper":     "{:.2f}",
-            "Lower":     "{:.2f}"
-        }),
-        use_container_width=True
-    )
-
-    # Summary footer
-    sm1, sm2, sm3, sm4 = st.columns(4)
-    sm1.metric("Walk-Forward R²",  wf_r2_str)
-    sm2.metric("Directional Acc",  da_str)
-    sm3.metric("MAPE",             mape_str)
-    sm4.metric("Beats Naïve",      "✅ Yes" if wins >= 2 else "⚠️ Partial")
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  TAB 3 — SENTIMENT
-# ══════════════════════════════════════════════════════════════════════════════
-elif tab == "Sentiment":
-    st.subheader("News Sentiment")
-    if news_posts:
-        df_s = pd.DataFrame({'News': news_posts, 'Link': news_links, 'Score': vader_scores})
-        def color(val):
-            return f"color: {'green' if val > 0.1 else 'red' if val < -0.1 else 'gray'}"
-        st.dataframe(
-            df_s.style.applymap(color, subset=['Score']).format({'Score': '{:.3f}'}),
-            use_container_width=True
-        )
-        pos = sum(1 for s in vader_scores if s > 0.1)
-        neg = sum(1 for s in vader_scores if s < -0.1)
-        neu = len(vader_scores) - pos - neg
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Positive", pos)
-        c2.metric("Negative", neg)
-        c3.metric("Neutral",  neu)
+    # ── Health score ──────────────────────────────────────────────────────────
+    if health_score >= 80:
+        bar_color, verdict = "#5dbc8a", "🟢 Production-Ready"
+    elif health_score >= 60:
+        bar_color, verdict = "#e0b070", "🟡 Needs Minor Work"
     else:
-        st.info("No news available.")
+        bar_color, verdict = "#e07070", "🔴 Significant Issues"
+    st.subheader(f"⭐ Dataset Health Score — {verdict}")
+    st.markdown(
+        f'<div style="margin-top:12px"><div class="health-bar-bg">'
+        f'<div style="width:{health_score}%;background:{bar_color};height:100%;border-radius:8px;"></div>'
+        f'</div><p style="color:{bar_color};font-size:1.4rem;font-weight:700;margin-top:8px">'
+        f'{health_score} / 100</p></div>',
+        unsafe_allow_html=True,
+    )
+    st.divider()
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  TAB 4 — COMPARISON
-# ══════════════════════════════════════════════════════════════════════════════
-elif tab == "Comparison":
-    st.subheader(f"**{selected_ticker} vs {compare_ticker}**")
-    if data_main is not None and data_compare is not None:
-        bm = data_main['Adj Close'].iloc[0]
-        bc = data_compare['Adj Close'].iloc[0]
-        dm = (data_main['Adj Close']    / bm - 1) * 100
-        dc = (data_compare['Adj Close'] / bc - 1) * 100
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(x=data_main.index,    y=dm,
-                                 name=selected_ticker, line=dict(color='#26A69A')))
-        fig.add_trace(go.Scatter(x=data_compare.index, y=dc,
-                                 name=compare_ticker,  line=dict(color='#AB47BC')))
-        fig.update_layout(title="Normalised Performance (%)",
-                          height=600, template="plotly_white")
-        st.plotly_chart(fig, use_container_width=True)
-        rm = (data_main['Adj Close'].iloc[-1]    / bm - 1) * 100
-        rc = (data_compare['Adj Close'].iloc[-1] / bc - 1) * 100
-        vm = data_main['Adj Close'].pct_change().std()    * np.sqrt(252) * 100
-        vc = data_compare['Adj Close'].pct_change().std() * np.sqrt(252) * 100
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric(f"{selected_ticker} Return", f"{rm:+.2f}%")
-        c2.metric(f"{compare_ticker} Return",  f"{rc:+.2f}%")
-        c3.metric(f"{selected_ticker} Vol",    f"{vm:.1f}%")
-        c4.metric(f"{compare_ticker} Vol",     f"{vc:.1f}%")
-    else:
-        st.error("Not enough data to compare.")
+    # ── Pre-compute new sections ──────────────────────────────────────────────
+    with st.spinner("Computing multicollinearity scores…"):
+        X_num_only      = X_all[numeric_feats].copy() if numeric_feats else pd.DataFrame()
+        vif_df          = compute_vif(X_num_only) if len(numeric_feats) >= 2 else pd.DataFrame()
+        corr_matrix     = X_num_only.corr() if len(numeric_feats) >= 2 else pd.DataFrame()
+        high_corr_pairs = get_high_corr_pairs(corr_matrix, 0.75) if not corr_matrix.empty else pd.DataFrame()
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  TAB 5 — PORTFOLIO ANALYZER
-# ══════════════════════════════════════════════════════════════════════════════
-elif tab == "Portfolio Analyzer":
-    st.subheader("Portfolio Analyzer")
-    port_tickers = st.multiselect("Select Tickers", tickers,
-                                  default=[selected_ticker, compare_ticker])
-    if len(port_tickers) < 2:
-        st.warning("Select at least 2 tickers.")
-    else:
-        weights, total_w = [], 0.0
-        cols = st.columns(len(port_tickers))
-        for i, tick in enumerate(port_tickers):
-            w = cols[i].number_input(f"Weight {tick} (%)", 0.0, 100.0,
-                                     100.0 / len(port_tickers))
-            weights.append(w / 100)
-            total_w += w
-        if abs(total_w - 100) > 0.01:
-            st.warning(f"Weights sum to {total_w:.1f}%. Should be 100%.")
+    with st.spinner("Running statistical significance tests…"):
+        stat_df = run_statistical_tests(df_clean, target_column, task_type)
+
+    with st.spinner("Computing Mutual Information scores…"):
+        mi_df = compute_mutual_info(X_all, y_all, task_type, numeric_feats, cat_feats)
+
+    # ── Tabs ──────────────────────────────────────────────────────────────────
+    tab_metrics, tab_analysis, tab_features, tab_dq, tab_mc, tab_st = st.tabs([
+        "📊 Model Metrics",
+        "🧠 Expert Analysis",
+        "🌲 Feature Importance",
+        "🔍 Data Quality",
+        "🔗 Multicollinearity",
+        "📐 Statistical Tests",
+    ])
+
+    # ════════════════════════════════════════════════════════════════════
+    # TAB 1 — Model Metrics
+    # ════════════════════════════════════════════════════════════════════
+    with tab_metrics:
+        st.subheader("Model Performance Metrics")
+        st.caption(f"Auto-detected task: **{task_type}** | {diagnosis}")
+        if task_type == "regression":
+            m1,m2,m3,m4,m5 = st.columns(5)
+            m1.metric("R² (Baseline)",      metrics.get("r2_baseline","—"))
+            m2.metric("R² (Random Forest)", metrics.get("r2_rf","—"))
+            m3.metric("MAE",                metrics.get("mae","—"))
+            m4.metric("RMSE",               metrics.get("rmse","—"))
+            m5.metric("CV R² (5-fold)",     f"{metrics.get('cv_r2_mean','—')} ± {metrics.get('cv_r2_std','—')}")
         else:
-            data_dict = {}
-            for tick in port_tickers:
-                d = fetch_stock_data(tick, start_date, end_date)
-                if d is None:
-                    st.error(f"Data missing for {tick}."); st.stop()
-                data_dict[tick] = d['Adj Close']
-            port_df = pd.DataFrame(data_dict)
-            rets    = port_df.pct_change().dropna()
-            m_ret   = rets.mean() * 252
-            cov_mat = rets.cov()  * 252
-            w_np    = np.array(weights)
-            p_ret   = np.dot(m_ret, w_np)
-            p_vol   = np.sqrt(np.dot(w_np.T, np.dot(cov_mat, w_np)))
-            sharpe  = (p_ret - 0.03) / p_vol
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Expected Return",      f"{p_ret*100:.2f}%")
-            c2.metric("Portfolio Volatility",  f"{p_vol*100:.2f}%")
-            c3.metric("Sharpe Ratio",          f"{sharpe:.2f}")
-            fig_h = px.imshow(rets.corr(), text_auto=True, aspect="auto",
-                              color_continuous_scale='RdBu_r',
-                              title="Correlation Heatmap")
-            st.plotly_chart(fig_h, use_container_width=True)
+            m1,m2,m3,m4,m5 = st.columns(5)
+            m1.metric("Accuracy (Baseline)", metrics.get("accuracy_baseline","—"))
+            m2.metric("Accuracy (RF)",       metrics.get("accuracy_rf","—"))
+            m3.metric("F1 Score",            metrics.get("f1_score","—"))
+            m4.metric("ROC-AUC",             metrics.get("roc_auc","—"))
+            m5.metric("CV Acc (5-fold)",     f"{metrics.get('cv_accuracy_mean','—')} ± {metrics.get('cv_accuracy_std','—')}")
+        st.divider()
+        if task_type == "regression":
+            raw = {
+                "R² Score":     max(0.0, float(metrics.get("r2_rf", 0))),
+                "Low MAE":      max(0.0, 1 - min(1.0, float(metrics.get("mae",0)) / max(float(df_clean[target_column].std()),1))),
+                "Data Density": min(1.0, metrics.get("rows",0) / 10000),
+                "Completeness": 1 - profile.get("missing_pct",0) / 100,
+                "No Dupes":     1 - min(1.0, profile.get("duplicate_rows",0) / max(metrics.get("rows",1),1)),
+            }
+        else:
+            raw = {
+                "Accuracy":     float(metrics.get("accuracy_rf",0)),
+                "F1 Score":     float(metrics.get("f1_score",0)),
+                "ROC-AUC":      float(metrics.get("roc_auc", metrics.get("accuracy_rf",0))),
+                "Completeness": 1 - profile.get("missing_pct",0) / 100,
+                "No Dupes":     1 - min(1.0, profile.get("duplicate_rows",0) / max(metrics.get("rows",1),1)),
+            }
+        cats   = list(raw.keys())
+        values = [max(0.0, min(1.0, v)) for v in raw.values()]
+        fig_radar = go.Figure(go.Scatterpolar(
+            r=values+[values[0]], theta=cats+[cats[0]],
+            fill="toself", fillcolor="rgba(126,182,255,0.2)",
+            line=dict(color="#7eb6ff", width=2),
+        ))
+        fig_radar.update_layout(
+            polar=dict(
+                bgcolor="#1a1f35",
+                radialaxis=dict(visible=True, range=[0,1], gridcolor="#2e3555", color="#8892a4"),
+                angularaxis=dict(gridcolor="#2e3555", color="#e0e0e0"),
+            ),
+            showlegend=False, paper_bgcolor="#0e1117",
+            margin=dict(l=60,r=60,t=40,b=40), height=360,
+        )
+        st.plotly_chart(fig_radar, use_container_width=True)
 
-# ── News Ticker ───────────────────────────────────────────────────────────────
-st.markdown("---")
-st.markdown("### Latest Headlines (24/7)")
-all_h    = news_headlines + news_headlines
-anim_dur = max(15, len(news_headlines) * 3)
-st.markdown(f"""
-<style>
-.ticker-container{{height:180px;overflow:hidden;background:#0f172a;padding:16px;
-  border-radius:14px;box-shadow:0 6px 24px rgba(0,0,0,.3);
-  color:#fff;font-family:'Segoe UI',sans-serif;position:relative}}
-.ticker-wrapper{{animation:scroll-up {anim_dur}s linear infinite;will-change:transform}}
-@keyframes scroll-up{{0%{{transform:translateY(0)}}100%{{transform:translateY(-50%)}}}}
-.ticker-item{{padding:12px 0;font-size:15px;line-height:1.6;
-  min-height:40px;overflow:hidden;word-wrap:break-word}}
-</style>""", unsafe_allow_html=True)
-html_c = '<div class="ticker-container"><div class="ticker-wrapper">'
-for h in all_h:
-    html_c += f'<div class="ticker-item">{h}</div>'
-html_c += '</div></div>'
-st.markdown(html_c, unsafe_allow_html=True)
+    # ════════════════════════════════════════════════════════════════════
+    # TAB 2 — Expert Analysis
+    # ════════════════════════════════════════════════════════════════════
+    with tab_analysis:
+        st.caption("🤖 Analysis powered by **Claude (Anthropic)**")
+        for point in llm_analysis:
+            st.markdown(f'<div class="analysis-bullet">{point}</div>', unsafe_allow_html=True)
+
+    # ════════════════════════════════════════════════════════════════════
+    # TAB 3 — Feature Importance + FIX 3 (Mutual Information)
+    # ════════════════════════════════════════════════════════════════════
+    with tab_features:
+        if feature_imp:
+            fi_df = pd.DataFrame({
+                "Feature": list(feature_imp.keys()),
+                "RF Importance": list(feature_imp.values()),
+            }).sort_values("RF Importance", ascending=True)
+            fig_fi = px.bar(
+                fi_df, x="RF Importance", y="Feature", orientation="h",
+                title="Top Features — Random Forest Importance",
+                color="RF Importance", color_continuous_scale="Blues",
+                template="plotly_dark",
+            )
+            fig_fi.update_layout(paper_bgcolor="#0e1117", plot_bgcolor="#1a1f35", coloraxis_showscale=False)
+            st.plotly_chart(fig_fi, use_container_width=True)
+        else:
+            st.info("RF importance could not be computed.")
+
+        # FIX 3 — Mutual Information
+        st.markdown('<span class="section-tag">🆕 FIX 3 — Model-Free Signal Check</span>', unsafe_allow_html=True)
+        st.subheader("📡 Mutual Information vs RF Importance")
+        st.markdown(
+            "**RF importance** can be biased toward high-cardinality features. "
+            "**Mutual Information** is completely model-free and captures any dependency (linear or non-linear). "
+            "Large discrepancies between the two indicate potential over-rating or under-rating by RF."
+        )
+        if not mi_df.empty:
+            if feature_imp:
+                rf_norm = pd.DataFrame({
+                    "Feature": list(feature_imp.keys()),
+                    "RF Importance": list(feature_imp.values()),
+                })
+                max_rf = rf_norm["RF Importance"].max()
+                rf_norm["RF_norm"] = (rf_norm["RF Importance"] / max_rf).round(4) if max_rf > 0 else 0.0
+                compare = mi_df[["Feature","MI_norm"]].merge(rf_norm[["Feature","RF_norm"]], on="Feature", how="outer").fillna(0)
+                compare = compare.sort_values("MI_norm", ascending=False).head(12)
+                clong = compare.melt(id_vars="Feature", value_vars=["MI_norm","RF_norm"], var_name="Method", value_name="Score")
+                clong["Method"] = clong["Method"].map({"MI_norm":"Mutual Information","RF_norm":"Random Forest"})
+                fig_cmp = px.bar(
+                    clong, x="Feature", y="Score", color="Method", barmode="group",
+                    title="Feature Importance Comparison (normalised 0-1)",
+                    template="plotly_dark",
+                    color_discrete_map={"Mutual Information":"#7eb6ff","Random Forest":"#5dbc8a"},
+                )
+                fig_cmp.update_layout(
+                    paper_bgcolor="#0e1117", plot_bgcolor="#1a1f35",
+                    xaxis=dict(gridcolor="#2e3555", tickangle=-30),
+                    yaxis=dict(gridcolor="#2e3555"),
+                    legend=dict(bgcolor="#1a1f35"),
+                )
+                st.plotly_chart(fig_cmp, use_container_width=True)
+
+                big_disc = compare[(compare["MI_norm"] - compare["RF_norm"]).abs() > 0.25]
+                if not big_disc.empty:
+                    st.warning(
+                        f"⚠️ **{len(big_disc)} feature(s)** show MI vs RF discrepancy > 0.25: "
+                        f"**{', '.join(big_disc['Feature'].tolist())}** — RF may be biased here."
+                    )
+            else:
+                fig_mi = px.bar(
+                    mi_df.sort_values("MI_norm", ascending=True),
+                    x="MI_norm", y="Feature", orientation="h",
+                    title="Mutual Information (normalised)",
+                    color="MI_norm", color_continuous_scale="Blues",
+                    template="plotly_dark",
+                )
+                fig_mi.update_layout(paper_bgcolor="#0e1117", plot_bgcolor="#1a1f35", coloraxis_showscale=False)
+                st.plotly_chart(fig_mi, use_container_width=True)
+
+            with st.spinner("Claude interpreting MI vs RF discrepancies…"):
+                mi_bullets = call_llm(f"""Senior ML engineer reviewing feature importance comparison.
+MI scores (top 8): {mi_df[['Feature','MI_norm']].head(8).to_dict('records')}
+RF importances: {list(feature_imp.items())[:8] if feature_imp else 'N/A'}
+Task: {task_type}
+Return ONLY a JSON array of 4-5 bullet strings covering: agreement between methods, discrepancies, 
+which features to trust, recommended feature selection actions. No preamble.""", 500)
+            st.markdown("**🤖 Claude's Assessment:**")
+            for b in mi_bullets:
+                st.markdown(f'<div class="analysis-bullet">{b}</div>', unsafe_allow_html=True)
+        else:
+            st.info("Mutual Information could not be computed.")
+
+        if profile.get("top_correlations"):
+            st.subheader("📈 Pearson Correlation with Target")
+            corr_df = pd.DataFrame({
+                "Feature": list(profile["top_correlations"].keys()),
+                "Correlation": list(profile["top_correlations"].values()),
+            }).sort_values("Correlation", key=abs, ascending=True)
+            fig_corr = px.bar(
+                corr_df, x="Correlation", y="Feature", orientation="h",
+                color="Correlation", color_continuous_scale="RdBu",
+                color_continuous_midpoint=0, template="plotly_dark",
+            )
+            fig_corr.update_layout(paper_bgcolor="#0e1117", plot_bgcolor="#1a1f35", coloraxis_showscale=False)
+            st.plotly_chart(fig_corr, use_container_width=True)
+
+    # ════════════════════════════════════════════════════════════════════
+    # TAB 4 — Data Quality
+    # ════════════════════════════════════════════════════════════════════
+    with tab_dq:
+        qa, qb = st.columns(2)
+        with qa:
+            st.subheader("🧩 Missing Values per Column")
+            miss_s = df.isna().sum()
+            miss_s = miss_s[miss_s > 0]
+            if not miss_s.empty:
+                miss_df2 = miss_s.reset_index()
+                miss_df2.columns = ["Column","Missing Count"]
+                fig_miss = px.bar(miss_df2, x="Missing Count", y="Column",
+                    orientation="h", template="plotly_dark",
+                    color="Missing Count", color_continuous_scale="Reds")
+                fig_miss.update_layout(paper_bgcolor="#0e1117", plot_bgcolor="#1a1f35", coloraxis_showscale=False)
+                st.plotly_chart(fig_miss, use_container_width=True)
+            else:
+                st.success("✅ No missing values!")
+        with qb:
+            st.subheader("📊 Target Distribution")
+            if task_type == "classification":
+                vc = df_clean[target_column].value_counts().reset_index()
+                vc.columns = ["Class","Count"]
+                fig_dist = px.pie(vc, names="Class", values="Count",
+                    template="plotly_dark", color_discrete_sequence=px.colors.sequential.Blues_r)
+            else:
+                fig_dist = px.histogram(df_clean, x=target_column,
+                    template="plotly_dark", color_discrete_sequence=["#7eb6ff"], nbins=40)
+            fig_dist.update_layout(paper_bgcolor="#0e1117", plot_bgcolor="#1a1f35")
+            st.plotly_chart(fig_dist, use_container_width=True)
+
+        if profile.get("outlier_counts"):
+            st.subheader("⚠️ Outlier Summary (IQR)")
+            out_df2 = pd.DataFrame({
+                "Feature": list(profile["outlier_counts"].keys()),
+                "Outlier Count": list(profile["outlier_counts"].values()),
+            }).sort_values("Outlier Count", ascending=False)
+            st.dataframe(out_df2, use_container_width=True, hide_index=True)
+        else:
+            st.success("✅ No significant outliers!")
+
+        st.subheader("🏷️ Data Quality Flags")
+        flags = []
+        if profile.get("constant_features"):
+            flags.append(f'<span class="pill pill-red">⚠️ {len(profile["constant_features"])} constant feature(s)</span>')
+        if profile.get("high_cardinality_cols"):
+            flags.append(f'<span class="pill pill-amber">⚠️ {len(profile["high_cardinality_cols"])} high-cardinality col(s)</span>')
+        if profile.get("duplicate_rows",0) > 0:
+            flags.append(f'<span class="pill pill-amber">⚠️ {profile["duplicate_rows"]} duplicate rows</span>')
+        if profile.get("missing_pct",0) > 10:
+            flags.append(f'<span class="pill pill-red">⚠️ {profile["missing_pct"]}% missing values</span>')
+        if profile.get("imbalance_ratio") and profile["imbalance_ratio"] > 3:
+            flags.append(f'<span class="pill pill-amber">⚠️ Imbalance {profile["imbalance_ratio"]}:1</span>')
+        if flags:
+            st.markdown(" ".join(flags), unsafe_allow_html=True)
+        else:
+            st.markdown('<span class="pill pill-green">✅ No critical flags</span>', unsafe_allow_html=True)
+
+    # ════════════════════════════════════════════════════════════════════
+    # TAB 5 — Multicollinearity (FIX 1)
+    # ════════════════════════════════════════════════════════════════════
+    with tab_mc:
+        st.markdown('<span class="section-tag">🆕 FIX 1 — Multicollinearity Detection</span>', unsafe_allow_html=True)
+        st.subheader("🔗 Multicollinearity Analysis")
+        st.markdown("""
+**Why this matters:** When two features are highly correlated *with each other*, the model cannot
+reliably determine which one drives the target. This makes coefficients unstable and feature importances
+misleading. The previous version only checked feature-*target* correlation. This tab checks
+feature-*feature* correlation.
+
+**VIF guide:** < 5 = OK · 5–10 = moderate concern · > 10 = high multicollinearity (consider removing)
+        """)
+
+        if len(numeric_feats) < 2:
+            st.info("At least 2 numeric features needed for multicollinearity analysis.")
+        else:
+            cv1, cv2 = st.columns([1, 2])
+
+            with cv1:
+                st.subheader("📋 VIF Scores")
+                if not vif_df.empty:
+                    def color_vif(row):
+                        v = row["VIF"]
+                        if pd.isna(v):     return ["", "color: #8892a4"]
+                        if v > 10:         return ["", "color: #e07070; font-weight:700"]
+                        if v > 5:          return ["", "color: #e0b070; font-weight:600"]
+                        return ["", "color: #5dbc8a"]
+                    st.dataframe(
+                        vif_df.style.apply(color_vif, axis=1),
+                        use_container_width=True, hide_index=True,
+                    )
+                    high_vif = vif_df[vif_df["VIF"] > 10]
+                    mod_vif  = vif_df[(vif_df["VIF"] > 5) & (vif_df["VIF"] <= 10)]
+                    if not high_vif.empty:
+                        st.error(f"🔴 Critical VIF > 10: {', '.join(high_vif['Feature'].tolist())}")
+                    if not mod_vif.empty:
+                        st.warning(f"🟡 Moderate VIF 5-10: {', '.join(mod_vif['Feature'].tolist())}")
+                    if high_vif.empty and mod_vif.empty:
+                        st.success("✅ All VIF < 5 — no multicollinearity concern.")
+                else:
+                    st.info("VIF could not be computed.")
+
+            with cv2:
+                st.subheader("🌡️ Feature Correlation Heatmap")
+                if not corr_matrix.empty:
+                    show_cols = corr_matrix.columns.tolist()[:20]
+                    cm_sub    = corr_matrix.loc[show_cols, show_cols]
+                    fig_heat  = go.Figure(go.Heatmap(
+                        z=cm_sub.values, x=cm_sub.columns.tolist(), y=cm_sub.index.tolist(),
+                        colorscale="RdBu", zmid=0, zmin=-1, zmax=1,
+                        text=np.round(cm_sub.values, 2),
+                        texttemplate="%{text}", textfont={"size": 9},
+                        hovertemplate="<b>%{y}</b> × <b>%{x}</b><br>r = %{z:.3f}<extra></extra>",
+                    ))
+                    fig_heat.update_layout(
+                        paper_bgcolor="#0e1117", plot_bgcolor="#1a1f35",
+                        font=dict(color="#e0e0e0"),
+                        xaxis=dict(tickangle=-45, tickfont=dict(size=10)),
+                        yaxis=dict(tickfont=dict(size=10)),
+                        height=450, margin=dict(l=10,r=10,t=20,b=80),
+                    )
+                    st.plotly_chart(fig_heat, use_container_width=True)
+
+            st.subheader("⚡ Highly Correlated Pairs (|r| ≥ 0.75)")
+            if not high_corr_pairs.empty:
+                st.dataframe(high_corr_pairs, use_container_width=True, hide_index=True)
+            else:
+                st.success("✅ No feature pairs exceed the 0.75 correlation threshold.")
+
+            st.subheader("🤖 Claude's Multicollinearity Assessment")
+            with st.spinner("Claude analysing multicollinearity…"):
+                mc_bullets = call_llm(f"""Senior ML engineer reviewing multicollinearity report.
+VIF scores (top 10): {vif_df.head(10).to_dict('records') if not vif_df.empty else []}
+High-correlation pairs (|r|>=0.75): {high_corr_pairs.head(5).to_dict('records') if not high_corr_pairs.empty else []}
+Numeric features count: {len(numeric_feats)}
+Task type: {task_type}
+Return ONLY a JSON array of 5-6 bullet strings covering: which features have dangerous VIF,
+which correlated pairs to address, how to fix (drop/PCA/domain knowledge), impact on model.
+No preamble.""", 600)
+            for b in mc_bullets:
+                st.markdown(f'<div class="analysis-bullet">{b}</div>', unsafe_allow_html=True)
+
+    # ════════════════════════════════════════════════════════════════════
+    # TAB 6 — Statistical Tests (FIX 2)
+    # ════════════════════════════════════════════════════════════════════
+    with tab_st:
+        st.markdown('<span class="section-tag">🆕 FIX 2 — Statistical Hypothesis Testing</span>', unsafe_allow_html=True)
+        st.subheader("📐 Per-Feature Statistical Significance Tests")
+        st.markdown(f"""
+**What this does:** Runs proper hypothesis tests on every feature to determine if it has a
+statistically significant relationship with the target variable.
+
+| Scenario | Test Used |
+|---|---|
+| Numeric feature + Regression target | Pearson correlation + p-value |
+| Numeric feature + Binary classification | Welch t-test (unequal variance) |
+| Numeric feature + Multi-class | One-way ANOVA F-test |
+| Categorical feature (any task) | Chi-squared test of independence |
+
+**Significance threshold:** p < 0.05
+        """)
+
+        if stat_df.empty:
+            st.info("Statistical tests could not be run on this dataset.")
+        else:
+            n_sig = (stat_df["Significant"] == "Yes").sum()
+            n_not = (stat_df["Significant"] == "No").sum()
+            st.markdown(
+                f'<span class="pill pill-green">✅ {n_sig} significant features (p < 0.05)</span>'
+                f'<span class="pill pill-red">❌ {n_not} non-significant features</span>',
+                unsafe_allow_html=True,
+            )
+            st.markdown("<br>", unsafe_allow_html=True)
+
+            stat_display = stat_df.sort_values(
+                ["Significant","p-value"], ascending=[False, True]
+            ).reset_index(drop=True)
+
+            # Rename for display
+            disp_cols = ["Feature","Type","Test","Statistic","p-value","Significant"]
+            st.dataframe(stat_display[disp_cols], use_container_width=True, hide_index=True)
+
+            # -log10(p) bar chart
+            st.subheader("📉 Feature Significance Chart (-log10 p-value)")
+            st.caption("Bars crossing the dashed orange line are statistically significant (p < 0.05)")
+            pvc = stat_display[["Feature","p-value","Significant"]].copy()
+            pvc["-log10(p)"] = -np.log10(pvc["p-value"].clip(lower=1e-10))
+            fig_pv = px.bar(
+                pvc.sort_values("-log10(p)", ascending=True),
+                x="-log10(p)", y="Feature", orientation="h",
+                color="Significant",
+                color_discrete_map={"Yes":"#5dbc8a","No":"#e07070"},
+                template="plotly_dark",
+            )
+            fig_pv.add_vline(
+                x=1.301, line_dash="dash", line_color="#e0b070",
+                annotation_text="p=0.05", annotation_font_color="#e0b070",
+                annotation_position="top right",
+            )
+            fig_pv.update_layout(
+                paper_bgcolor="#0e1117", plot_bgcolor="#1a1f35",
+                xaxis=dict(gridcolor="#2e3555"),
+                yaxis=dict(gridcolor="#2e3555"),
+                legend=dict(bgcolor="#1a1f35"),
+                height=max(300, len(stat_display) * 28),
+            )
+            st.plotly_chart(fig_pv, use_container_width=True)
+
+            sig_rows = stat_display[stat_display["Significant"] == "Yes"]
+            if not sig_rows.empty:
+                with st.expander("📋 Interpretation for Significant Features", expanded=False):
+                    for _, row in sig_rows.iterrows():
+                        st.markdown(
+                            f'<div class="analysis-bullet">'
+                            f'<b>{row["Feature"]}</b> ({row["Test"]}) — '
+                            f'stat={row["Statistic"]}, p={row["p-value"]} · '
+                            f'{row.get("Interpretation","")}'
+                            f'</div>',
+                            unsafe_allow_html=True,
+                        )
+
+            st.subheader("🤖 Claude's Statistical Assessment")
+            with st.spinner("Claude interpreting significance results…"):
+                sig_list  = stat_display[stat_display["Significant"]=="Yes"][["Feature","Test","p-value"]].head(10).to_dict("records")
+                nsig_list = stat_display[stat_display["Significant"]=="No"]["Feature"].tolist()
+                st_bullets = call_llm(f"""Senior ML engineer reviewing hypothesis test results.
+Task type: {task_type}
+Total features tested: {len(stat_df)}
+SIGNIFICANT features (p<0.05): {json.dumps(sig_list)}
+NON-significant features: {nsig_list}
+Return ONLY a JSON array of 5-6 bullet strings covering: strongest predictors, whether to drop
+non-significant features, overfitting risk, feature selection recommendations, statistical caveats.
+No preamble.""", 600)
+            for b in st_bullets:
+                st.markdown(f'<div class="analysis-bullet">{b}</div>', unsafe_allow_html=True)
+
+    st.divider()
+    st.caption("AutoML Debugger v2 · Streamlit · scikit-learn · Plotly · Anthropic Claude")
