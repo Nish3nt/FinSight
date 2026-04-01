@@ -14,6 +14,7 @@ Three flaws fixed in this version:
 """
 
 import os
+import sys
 import json
 import streamlit as st
 import pandas as pd
@@ -33,7 +34,23 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-from src.debugger_engine import run_debugger_pipeline
+# ── Fix for Streamlit Cloud: ensure the folder containing app.py is on sys.path
+# On Streamlit Cloud, __file__ = /mount/src/<repo>/<subdir>/app.py
+# Python won't find `src/` unless we add that directory explicitly.
+_APP_DIR = Path(__file__).resolve().parent
+if str(_APP_DIR) not in sys.path:
+    sys.path.insert(0, str(_APP_DIR))
+
+try:
+    from src.debugger_engine import run_debugger_pipeline
+except ModuleNotFoundError:
+    # Fallback: try importing debugger_engine directly if src/ is flat
+    import importlib, types
+    _eng_path = _APP_DIR / "src" / "debugger_engine.py"
+    _spec = importlib.util.spec_from_file_location("debugger_engine", str(_eng_path))
+    _mod  = importlib.util.module_from_spec(_spec)
+    _spec.loader.exec_module(_mod)
+    run_debugger_pipeline = _mod.run_debugger_pipeline
 
 ANTHROPIC_API_KEY = "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"
 
