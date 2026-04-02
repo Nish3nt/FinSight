@@ -2,7 +2,7 @@
 #  FinSight — app.py
 #  Model  : Multi-feature LSTM  |  Target : Log Returns
 #  Eval   : Walk-Forward R², Directional Accuracy, MAPE, RMSE, Naïve Baseline
-#  LLM    : Anthropic Claude via raw HTTP (no anthropic SDK — zero extra deps)
+#  LLM    : OpenAI GPT-4o via raw HTTP (no openai SDK — zero extra deps)
 # =============================================================================
 
 import streamlit as st
@@ -33,32 +33,31 @@ st.set_page_config(page_title="FinSight", layout="wide")
 
 # ── Anthropic — pure HTTP, no SDK package needed ──────────────────────────────
 # Uses requests (already installed for Finnhub). Zero extra dependencies.
-ANTHROPIC_API_KEY = st.secrets.get("ANTHROPIC_API_KEY", "")
+OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY", "")
 
-def call_claude(prompt, max_tokens=800):
+def call_llm(prompt, max_tokens=800):
     """
-    Calls Claude via raw HTTP POST — no anthropic SDK required.
+    Calls OpenAI GPT-4o via raw HTTP POST — no openai SDK required.
     Uses the requests library which is already installed (used for Finnhub).
     Never raises; returns an error string if something goes wrong.
     """
     try:
         resp = requests.post(
-            "https://api.anthropic.com/v1/messages",
+            "https://api.openai.com/v1/chat/completions",
             headers={
-                "x-api-key":         ANTHROPIC_API_KEY,
-                "anthropic-version": "2023-06-01",
-                "content-type":      "application/json",
+                "Authorization": "Bearer {}".format(OPENAI_API_KEY),
+                "Content-Type":  "application/json",
             },
             json={
-                "model":      "claude-sonnet-4-5",
+                "model":      "gpt-4o",
                 "max_tokens": max_tokens,
                 "messages":   [{"role": "user", "content": prompt}],
             },
             timeout=60,
         )
         if resp.status_code == 200:
-            return resp.json()["content"][0]["text"].strip()
-        return "Claude API error {}: {}".format(resp.status_code, resp.text[:200])
+            return resp.json()["choices"][0]["message"]["content"].strip()
+        return "OpenAI API error {}: {}".format(resp.status_code, resp.text[:200])
     except Exception as e:
         return "LLM unavailable: {}".format(e)
 
@@ -801,7 +800,7 @@ elif tab == "Predictions":
     # ── SECTION D — CLAUDE LLM ANALYSIS (PREDICTIONS) ────────────────────────
     st.markdown("---")
     st.markdown("## AI Expert Analysis — Predictions")
-    st.caption("Claude (Anthropic) interprets the model performance and forecast in plain English.")
+    st.caption("GPT-4o (OpenAI) interprets the model performance and forecast in plain English.")
 
     final_price  = future_preds_price[-1]
     price_change = final_price - last_price
@@ -865,12 +864,12 @@ elif tab == "Predictions":
         days, direction, pct_change, selected_ticker
     )
 
-    with st.spinner("Claude is analysing the model performance and forecast..."):
-        llm_pred_response = call_claude(pred_prompt, max_tokens=1000)
+    with st.spinner("GPT-4o is analysing the model performance and forecast..."):
+        llm_pred_response = call_llm(pred_prompt, max_tokens=1000)
 
     st.markdown(
         '<div class="llm-box">'
-        '<div class="llm-header">Claude Analysis — {} Predictions</div>'
+        '<div class="llm-header">GPT-4o Analysis — {} Predictions</div>'
         '{}'
         '</div>'.format(
             selected_ticker,
@@ -998,7 +997,7 @@ elif tab == "Comparison":
         # ── CLAUDE LLM ANALYSIS (COMPARISON) ─────────────────────────────────
         st.markdown("---")
         st.markdown("## AI Expert Analysis — Comparison")
-        st.caption("Claude (Anthropic) compares both stocks across return, risk, correlation and portfolio fit.")
+        st.caption("GPT-4o (OpenAI) compares both stocks across return, risk, correlation and portfolio fit.")
 
         years  = max((data_main.index[-1] - data_main.index[0]).days / 365, 0.01)
         cagr_m = ((data_main['Adj Close'].iloc[-1]    / data_main['Adj Close'].iloc[0])    ** (1/years) - 1) * 100
@@ -1054,12 +1053,12 @@ elif tab == "Comparison":
             beta_val, corr_val, compare_ticker
         )
 
-        with st.spinner("Claude is comparing both stocks..."):
-            llm_comp_response = call_claude(comp_prompt, max_tokens=1000)
+        with st.spinner("GPT-4o is comparing both stocks..."):
+            llm_comp_response = call_llm(comp_prompt, max_tokens=1000)
 
         st.markdown(
             '<div class="llm-box">'
-            '<div class="llm-header">Claude Analysis — {} vs {}</div>'
+            '<div class="llm-header">GPT-4o Analysis — {} vs {}</div>'
             '{}'
             '</div>'.format(
                 selected_ticker, compare_ticker,
