@@ -33,7 +33,7 @@ st.set_page_config(page_title="FinSight", layout="wide")
 
 # ── Anthropic — pure HTTP, no SDK package needed ──────────────────────────────
 # Uses requests (already installed for Finnhub). Zero extra dependencies.
-ANTHROPIC_API_KEY = "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"
+ANTHROPIC_API_KEY = st.secrets.get("ANTHROPIC_API_KEY", "")
 
 def call_claude(prompt, max_tokens=800):
     """
