@@ -834,7 +834,7 @@ elif tab == "Sentiment":
         def color(val):
             return f"color: {'green' if val > 0.1 else 'red' if val < -0.1 else 'gray'}"
         st.dataframe(
-            df_s.style.applymap(color, subset=['Score']).format({'Score': '{:.3f}'}),
+            df_s.style.map(color, subset=['Score']).format({'Score': '{:.3f}'}),
             use_container_width=True
         )
         pos = sum(1 for s in vader_scores if s > 0.1)
