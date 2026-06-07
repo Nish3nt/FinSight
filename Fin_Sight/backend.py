@@ -1,13 +1,26 @@
 # =============================================================================
 #  FinSight — backend.py
-#  Self-installs ALL dependencies at runtime before any imports
-#  Works on any Python version on Streamlit Cloud
+#  Self-installs all dependencies at runtime before any imports
 # =============================================================================
 
 import subprocess
 import sys
 
-# Install every single dependency needed by both backend and app
+def _install(package):
+    """
+    Install a package silently.
+    Uses run() instead of check_call() so a single failed package
+    does not crash the entire app.
+    """
+    result = subprocess.run(
+        [sys.executable, "-m", "pip", "install", package,
+         "--quiet", "--no-warn-script-location"],
+        capture_output=True, text=True
+    )
+    return result.returncode == 0
+
+# tensorflow-cpu==2.18.0 is the latest version with Python 3.13 support
+# All other packages have wheels for Python 3.13
 _PACKAGES = [
     "yfinance==0.2.40",
     "pandas==2.2.2",
@@ -17,17 +30,12 @@ _PACKAGES = [
     "requests==2.32.3",
     "scikit-learn==1.5.0",
     "streamlit-option-menu==0.3.12",
-    "tensorflow-cpu",
+    "tensorflow-cpu==2.18.0",
     "tf-keras",
 ]
 
 for _pkg in _PACKAGES:
-    subprocess.check_call(
-        [sys.executable, "-m", "pip", "install", _pkg,
-         "--quiet", "--no-warn-script-location"],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL
-    )
+    _install(_pkg)
 
 # =============================================================================
 #  Safe imports after installation
@@ -44,16 +52,24 @@ from sklearn.metrics import mean_squared_error, r2_score
 import time
 import streamlit as st
 
+# TensorFlow import with fallback
 try:
     from tensorflow.keras.models import Sequential
     from tensorflow.keras.layers import LSTM, Dense, Dropout
     from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
     from tensorflow.keras.optimizers import Adam
 except ImportError:
-    from tf_keras.models import Sequential
-    from tf_keras.layers import LSTM, Dense, Dropout
-    from tf_keras.callbacks import EarlyStopping, ReduceLROnPlateau
-    from tf_keras.optimizers import Adam
+    try:
+        from tf_keras.models import Sequential
+        from tf_keras.layers import LSTM, Dense, Dropout
+        from tf_keras.callbacks import EarlyStopping, ReduceLROnPlateau
+        from tf_keras.optimizers import Adam
+    except ImportError:
+        import keras
+        from keras.models import Sequential
+        from keras.layers import LSTM, Dense, Dropout
+        from keras.callbacks import EarlyStopping, ReduceLROnPlateau
+        from keras.optimizers import Adam
 
 nltk.download('vader_lexicon', quiet=True)
 sia = SentimentIntensityAnalyzer()
