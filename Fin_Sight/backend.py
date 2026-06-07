@@ -1,18 +1,14 @@
 # =============================================================================
 #  FinSight — backend.py
-#  Self-installing: installs all dependencies at runtime before importing
-#  This bypasses Streamlit Cloud Python version and requirements.txt issues
+#  Self-installs ALL dependencies at runtime before any imports
+#  Works on any Python version on Streamlit Cloud
 # =============================================================================
 
 import subprocess
 import sys
 
-def install(package):
-    subprocess.check_call([sys.executable, "-m", "pip", "install",
-                           package, "--quiet", "--no-warn-script-location"])
-
-# Install all dependencies at runtime — works on any Python version
-packages = [
+# Install every single dependency needed by both backend and app
+_PACKAGES = [
     "yfinance==0.2.40",
     "pandas==2.2.2",
     "numpy==1.26.4",
@@ -21,20 +17,21 @@ packages = [
     "requests==2.32.3",
     "scikit-learn==1.5.0",
     "streamlit-option-menu==0.3.12",
-    "tensorflow-cpu",   # no version pin — pip picks best for current Python
-    "tf-keras",         # required companion for tensorflow-cpu on newer Python
+    "tensorflow-cpu",
+    "tf-keras",
 ]
 
-for pkg in packages:
-    try:
-        install(pkg)
-    except Exception as e:
-        print(f"Warning: could not install {pkg}: {e}")
+for _pkg in _PACKAGES:
+    subprocess.check_call(
+        [sys.executable, "-m", "pip", "install", _pkg,
+         "--quiet", "--no-warn-script-location"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL
+    )
 
 # =============================================================================
-#  Now safe to import everything
+#  Safe imports after installation
 # =============================================================================
-
 import yfinance as yf
 import pandas as pd
 import numpy as np
@@ -47,7 +44,6 @@ from sklearn.metrics import mean_squared_error, r2_score
 import time
 import streamlit as st
 
-# TensorFlow import — works with both tf2.15 and tf2.16+
 try:
     from tensorflow.keras.models import Sequential
     from tensorflow.keras.layers import LSTM, Dense, Dropout
@@ -63,7 +59,7 @@ nltk.download('vader_lexicon', quiet=True)
 sia = SentimentIntensityAnalyzer()
 
 # =============================================================================
-#  API KEYS & CONFIG
+#  API KEYS
 # =============================================================================
 GROQ_API_KEY = "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"
 GROQ_MODEL   = "llama-3.3-70b-versatile"
@@ -71,20 +67,15 @@ GROQ_URL     = "https://api.groq.com/openai/v1/chat/completions"
 FINNHUB_KEY  = "d6qgus9r01qhcrmk4od0d6qgus9r01qhcrmk4odg"
 
 # =============================================================================
-#  GROQ LLM HELPER
+#  GROQ LLM
 # =============================================================================
 def call_groq(prompt, max_tokens=600):
     try:
-        headers = {
-            "Authorization": f"Bearer {GROQ_API_KEY}",
-            "Content-Type":  "application/json"
-        }
-        payload = {
-            "model":       GROQ_MODEL,
-            "messages":    [{"role": "user", "content": prompt}],
-            "max_tokens":  max_tokens,
-            "temperature": 0.4
-        }
+        headers = {"Authorization": f"Bearer {GROQ_API_KEY}",
+                   "Content-Type": "application/json"}
+        payload = {"model": GROQ_MODEL,
+                   "messages": [{"role": "user", "content": prompt}],
+                   "max_tokens": max_tokens, "temperature": 0.4}
         r = requests.post(GROQ_URL, headers=headers,
                           json=payload, timeout=30)
         if r.status_code == 200:
@@ -94,7 +85,7 @@ def call_groq(prompt, max_tokens=600):
         return f"__ERROR__: {e}"
 
 # =============================================================================
-#  NEWS — FINNHUB
+#  NEWS
 # =============================================================================
 @st.cache_data(ttl=300)
 def get_news(ticker):
@@ -120,14 +111,14 @@ def get_news(ticker):
         return [f"Error: {e}"], [], []
 
 # =============================================================================
-#  VADER SENTIMENT
+#  SENTIMENT
 # =============================================================================
 @st.cache_data(ttl=300)
 def compute_vader(posts):
     return [sia.polarity_scores(p)['compound'] for p in posts]
 
 # =============================================================================
-#  STOCK DATA FETCH
+#  STOCK DATA
 # =============================================================================
 @st.cache_data(ttl=600)
 def fetch_stock_data(ticker, start, end):
@@ -163,39 +154,35 @@ def compute_features(raw):
     delta             = df['Adj Close'].diff()
     up = delta.clip(lower=0)
     dn = -delta.clip(upper=0)
-    df['RSI']         = 100 - 100 / (
+    df['RSI']      = 100 - 100 / (
         1 + up.rolling(14).mean() / (dn.rolling(14).mean() + 1e-9))
     rm = df['Adj Close'].rolling(20).mean()
     rs = df['Adj Close'].rolling(20).std()
-    df['BB_Width']    = (2 * rs) / (rm + 1e-9)
+    df['BB_Width'] = (2 * rs) / (rm + 1e-9)
     hl = df['High'] - df['Low']
     hc = (df['High'] - df['Adj Close'].shift()).abs()
     lc = (df['Low']  - df['Adj Close'].shift()).abs()
-    df['ATR']         = (pd.concat([hl, hc, lc], axis=1)
-                         .max(axis=1).rolling(14).mean())
-    df['LogVolume']   = np.log1p(df['Volume'])
-    feature_cols = [
-        'LogReturn', 'LogVolume',
-        'SMA20', 'SMA50', 'EMA12', 'EMA26',
-        'MACD', 'MACD_Signal',
-        'RSI', 'BB_Width', 'ATR'
-    ]
-    return df[feature_cols].dropna(), df['Adj Close']
+    df['ATR']      = (pd.concat([hl, hc, lc], axis=1)
+                      .max(axis=1).rolling(14).mean())
+    df['LogVolume'] = np.log1p(df['Volume'])
+    cols = ['LogReturn', 'LogVolume', 'SMA20', 'SMA50',
+            'EMA12', 'EMA26', 'MACD', 'MACD_Signal',
+            'RSI', 'BB_Width', 'ATR']
+    return df[cols].dropna(), df['Adj Close']
 
 # =============================================================================
-#  DRAWDOWN UTILITY
+#  DRAWDOWN
 # =============================================================================
 def compute_drawdown(series):
-    roll_max = series.cummax()
-    return (series - roll_max) / roll_max * 100
+    return (series - series.cummax()) / series.cummax() * 100
 
 # =============================================================================
-#  LSTM MODEL TRAINING
+#  LSTM TRAINING
 # =============================================================================
 @st.cache_resource(ttl=24 * 3600)
 def train_model(ticker, start_str, end_str,
                 time_step, epochs, batch_size, retrain_flag):
-    t0            = time.time()
+    t0 = time.time()
     training_time = datetime.now()
 
     raw = yf.download(ticker, start=start_str, end=end_str, progress=False)
@@ -205,7 +192,6 @@ def train_model(ticker, start_str, end_str,
         raw['Adj Close'] = raw['Close']
 
     df_feat, price_s = compute_features(raw)
-
     scaler = MinMaxScaler(feature_range=(-1, 1))
     scaled = scaler.fit_transform(df_feat.values)
 
@@ -213,18 +199,15 @@ def train_model(ticker, start_str, end_str,
     for i in range(len(scaled) - time_step):
         X.append(scaled[i:i + time_step, :])
         y.append(scaled[i + time_step, 0])
-    X = np.array(X)
-    y = np.array(y)
+    X = np.array(X); y = np.array(y)
 
-    n       = X.shape[0]
-    train_n = int(n * 0.80)
+    n = X.shape[0]; train_n = int(n * 0.80)
     X_tr, y_tr = X[:train_n], y[:train_n]
     X_te, y_te = X[train_n:], y[train_n:]
-    n_feat  = X.shape[2]
+    n_feat = X.shape[2]
 
     model = Sequential([
-        LSTM(128, return_sequences=True,
-             input_shape=(time_step, n_feat)),
+        LSTM(128, return_sequences=True, input_shape=(time_step, n_feat)),
         Dropout(0.2),
         LSTM(64),
         Dropout(0.15),
@@ -243,16 +226,11 @@ def train_model(ticker, start_str, end_str,
         ]
         val_split = 0.1
 
-    history = model.fit(
-        X_tr, y_tr,
-        epochs=epochs, batch_size=batch_size,
-        validation_split=val_split,
-        callbacks=cbs, verbose=0
-    )
+    history = model.fit(X_tr, y_tr, epochs=epochs, batch_size=batch_size,
+                        validation_split=val_split, callbacks=cbs, verbose=0)
 
     bt_pp, bt_ap, bt_pr, bt_ar = [], [], [], []
     dummy_row = np.zeros((1, n_feat))
-
     for i in range(len(X_te)):
         gi = time_step + train_n + i
         ps = float(model.predict(X_te[i:i+1], verbose=0)[0, 0])
@@ -269,24 +247,18 @@ def train_model(ticker, start_str, end_str,
 
     wf, fs = [], max(10, len(bt_pp) // 5)
     for f in range(5):
-        s = f * fs
-        e = min(s + fs, len(bt_pp))
-        if e - s < 5:
-            break
+        s = f * fs; e = min(s + fs, len(bt_pp))
+        if e - s < 5: break
         wf.append(float(r2_score(bt_ap[s:e], bt_pp[s:e])))
     wf_r2  = float(np.mean(wf)) if wf else 0.0
     mse_v  = float(mean_squared_error(bt_ap, bt_pp))
     r2_v   = float(r2_score(bt_ap, bt_pp))
     rmse_v = float(np.sqrt(mse_v))
-    mape_v = float(np.mean(
-        np.abs((bt_ap - bt_pp) / (np.abs(bt_ap) + 1e-9))) * 100)
-    da_v   = float(
-        np.mean(np.sign(bt_pr) == np.sign(bt_ar)) * 100)
-
+    mape_v = float(np.mean(np.abs((bt_ap-bt_pp)/(np.abs(bt_ap)+1e-9)))*100)
+    da_v   = float(np.mean(np.sign(bt_pr)==np.sign(bt_ar))*100)
     np_ = bt_ap[:-1]; na_ = bt_ap[1:]
     n_r2   = float(r2_score(na_, np_))
-    n_mape = float(np.mean(
-        np.abs((na_ - np_) / (np.abs(na_) + 1e-9))) * 100)
+    n_mape = float(np.mean(np.abs((na_-np_)/(np.abs(na_)+1e-9)))*100)
     n_rmse = float(np.sqrt(mean_squared_error(na_, np_)))
     rs_v   = float(np.std(bt_ap - bt_pp))
 
@@ -295,13 +267,9 @@ def train_model(ticker, start_str, end_str,
         df_feat=df_feat, price_series=price_s,
         time_step=time_step, train_n=train_n, n_feat=n_feat,
         bt_pp=bt_pp, bt_ap=bt_ap, bt_pr=bt_pr, bt_ar=bt_ar,
-        history=history.history,
-        training_time=training_time,
-        training_secs=time.time() - t0,
-        epochs=epochs, batch_size=batch_size,
-        mse=mse_v, r2=r2_v, rmse=rmse_v,
-        mape=mape_v, da=da_v,
+        history=history.history, training_time=training_time,
+        training_secs=time.time()-t0, epochs=epochs, batch_size=batch_size,
+        mse=mse_v, r2=r2_v, rmse=rmse_v, mape=mape_v, da=da_v,
         wf_r2=wf_r2, wf_list=wf,
-        n_r2=n_r2, n_mape=n_mape, n_rmse=n_rmse,
-        resid_std=rs_v
+        n_r2=n_r2, n_mape=n_mape, n_rmse=n_rmse, resid_std=rs_v
     )
