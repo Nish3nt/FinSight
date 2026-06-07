@@ -1,0 +1,11 @@
+streamlit
+pandas
+numpy
+plotly
+streamlit-option-menu
+yfinance
+scikit-learn
+joblib
+requests
+vaderSentiment
+groq
