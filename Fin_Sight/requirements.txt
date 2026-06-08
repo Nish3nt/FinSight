@@ -1,15 +1,14 @@
 streamlit==1.35.0
 streamlit-option-menu==0.3.12
 
-yfinance
-pandas
-numpy
-plotly
+yfinance==0.2.54
+pandas==2.2.2
+numpy==1.26.4
+plotly==5.22.0
 
-nltk
-requests
+nltk==3.8.1
+requests==2.32.3
 
-scikit-learn
+scikit-learn==1.5.0
 
-tensorflow
-tf-keras
+tensorflow==2.16.1
