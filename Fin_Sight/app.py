@@ -29,7 +29,7 @@ current_date = datetime.now().date()
 st.set_page_config(page_title="FinSight", layout="wide")
 
 # ── Groq Config ───────────────────────────────────────────────────────────────
-GROQ_API_KEY = "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"
+GROQ_API_KEY = "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"
 GROQ_MODEL   = "llama-3.3-70b-versatile"
 GROQ_URL     = "https://api.groq.com/openai/v1/chat/completions"
 
