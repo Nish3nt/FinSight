@@ -11,7 +11,7 @@
 
 ## 🌐 Live Demo
 
-🔗 [finsight-94srxzppan2fvumqpctyzb.streamlit.app](https://finsight-94srxzppan2fvumqpctyzb.streamlit.app)
+🔗 [FinSight](https://finsight-94srxzppan2fvumqpctyzb.streamlit.app)
 
 ---
 
