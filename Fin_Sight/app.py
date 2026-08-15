@@ -30,7 +30,7 @@ st.set_page_config(page_title="FinSight", layout="wide")
 
 # ── Groq Config ───────────────────────────────────────────────────────────────
 GROQ_API_KEY = "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"
-GROQ_MODEL   = "llama-3.3-70b-versatile"
+GROQ_MODEL   = "openai/gpt-oss-120b"
 GROQ_URL     = "https://api.groq.com/openai/v1/chat/completions"
 
 def call_groq(prompt, max_tokens=600):
