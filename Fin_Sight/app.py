@@ -1,7 +1,7 @@
 # =============================================================================
 #  FinSight — app.py  (ENHANCED — LLM Insights + Better Portfolio + Comparison)
 #  Model  : Multi-feature LSTM  |  Target : Log Returns
-#  LLM    : Groq llama-3.3-70b-versatile (hardcoded key)
+#  LLM    : Groq openai/gpt-oss-120b (hardcoded key)
 # =============================================================================
 
 import streamlit as st
@@ -32,6 +32,7 @@ st.set_page_config(page_title="FinSight", layout="wide")
 GROQ_API_KEY = "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"
 GROQ_MODEL   = "openai/gpt-oss-120b"
 GROQ_URL     = "https://api.groq.com/openai/v1/chat/completions"
+GROQ_LABEL   = "GPT OSS 120B"   # human-readable label used in UI text
 
 def call_groq(prompt, max_tokens=600):
     try:
@@ -602,13 +603,13 @@ elif tab == "Predictions":
     # ── LLM FORECAST ANALYSIS ─────────────────────────────────────────────────
     st.markdown("---")
     st.markdown("### 🤖 AI Forecast Analysis")
-    st.caption("Powered by Llama 3.3 70B via Groq — interpreting your model results in plain English")
+    st.caption(f"Powered by {GROQ_LABEL} via Groq — interpreting your model results in plain English")
 
     if st.button("Generate AI Analysis of Forecast", type="primary", key="pred_ai"):
         final_price = future_preds_price[-1]
         pct_change  = (final_price - last_price) / last_price * 100
         direction   = "upward" if pct_change > 0 else "downward"
-        with st.spinner("Analysing with Llama 3.3 70B..."):
+        with st.spinner(f"Analysing with {GROQ_LABEL}..."):
             prompt = f"""You are a professional stock analyst. Analyse this LSTM model forecast and provide a concise, insightful interpretation.
 
 Stock: {selected_ticker}
@@ -764,10 +765,10 @@ elif tab == "Comparison":
     # ── AI STOCK RECOMMENDATION ────────────────────────────────────────────────
     st.markdown("---")
     st.markdown("### 🤖 AI Stock Recommendation")
-    st.caption("Llama 3.3 70B analyses all metrics and tells you which stock to pick and why")
+    st.caption(f"{GROQ_LABEL} analyses all metrics and tells you which stock to pick and why")
 
     if st.button("Get AI Recommendation", type="primary", key="comp_ai"):
-        with st.spinner("Analysing with Llama 3.3 70B..."):
+        with st.spinner(f"Analysing with {GROQ_LABEL}..."):
             prompt = f"""You are a senior equity analyst with 20 years of experience.
 Compare these two stocks and give a clear investment recommendation.
 
@@ -821,7 +822,7 @@ Be specific, cite the numbers, and be decisive. Do not hedge or say "it depends 
             st.markdown(f"""<div class="{box_cls}">
               <div style="font-size:11px;color:#a3a3a3;text-transform:uppercase;
                           letter-spacing:.08em;margin-bottom:10px">
-                AI RECOMMENDATION — {GROQ_MODEL}</div>
+                AI RECOMMENDATION — {GROQ_LABEL}</div>
               <div style="font-size:14px;color:#e2e8f0;line-height:1.8;
                           white-space:pre-wrap">{rec_icon} {response}</div>
             </div>""", unsafe_allow_html=True)
@@ -1063,7 +1064,7 @@ elif tab == "Portfolio Analyzer":
     # ── LLM AI PORTFOLIO INSIGHTS ──────────────────────────────────────────────
     st.markdown("---")
     st.markdown("### 🤖 AI Portfolio Insights")
-    st.caption("Powered by Llama 3.3 70B via Groq — professional-grade portfolio analysis in seconds")
+    st.caption(f"Powered by {GROQ_LABEL} via Groq — professional-grade portfolio analysis in seconds")
 
     if st.button("Generate AI Portfolio Insights", type="primary", key="port_ai"):
         corr_matrix = rets.corr()
@@ -1074,7 +1075,7 @@ elif tab == "Portfolio Analyzer":
                 if v > max_pair[2]: max_pair = (port_tickers[i], port_tickers[j], v)
                 if v < min_pair[2]: min_pair = (port_tickers[i], port_tickers[j], v)
 
-        with st.spinner("Analysing portfolio with Llama 3.3 70B..."):
+        with st.spinner(f"Analysing portfolio with {GROQ_LABEL}..."):
             prompt = f"""You are a senior portfolio manager at a top-tier asset management firm.
 Provide a professional analysis of this portfolio with 4 specific, data-driven insights.
 
