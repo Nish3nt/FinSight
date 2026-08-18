@@ -29,7 +29,7 @@ current_date = datetime.now().date()
 st.set_page_config(page_title="FinSight", layout="wide")
 
 # ── Groq Config ───────────────────────────────────────────────────────────────
-GROQ_API_KEY = "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"
+GROQ_API_KEY = st.secrets["GROQ_API_KEY"]
 GROQ_MODEL   = "openai/gpt-oss-120b"
 GROQ_URL     = "https://api.groq.com/openai/v1/chat/completions"
 GROQ_LABEL   = "GPT OSS 120B"   # human-readable label used in UI text
